@@ -7,17 +7,32 @@ import { useState, useEffect, useRef } from 'react';
 import { GoogleGenAI, Type } from '@google/genai';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Send, Bot, User, FileText, Server, AlertTriangle, ListChecks, Download, Loader2, Sparkles, MessageSquare, Layers, Target, Zap, Shield, Database, Layout, Link2, ChevronRight, Activity, Share2, Edit2, Trash2, X, Copy, Check, Plus } from 'lucide-react';
+import { Send, Bot, User, FileText, Server, AlertTriangle, ListChecks, Download, Upload, Loader2, Sparkles, MessageSquare, Layers, Target, Zap, Shield, Database, Layout, Link2, ChevronRight, Activity, Share2, Edit2, Trash2, X, Copy, Check, Plus, RefreshCw, Settings, FileJson, Split } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { KnowledgeGraphView } from './components/KnowledgeGraph';
+import { Mermaid } from './components/Mermaid';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+
+declare global {
+  interface Window {
+    aistudio: {
+      hasSelectedApiKey: () => Promise<boolean>;
+      openSelectKey: () => Promise<void>;
+    };
+  }
+}
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-type Message = { id: string; role: 'user' | 'model'; text: string };
+type Message = { 
+  id: string; 
+  role: 'user' | 'model'; 
+  text: string;
+  comparison?: { model: string; text: string }[];
+};
 
 type KnowledgeCategory = 'use-case' | 'system-design' | 'implementation' | 'ambition' | 'constraint';
 type KnowledgeLayer = 'infrastructure' | 'data' | 'logic' | 'interface' | 'cross-cutting';
@@ -38,6 +53,8 @@ type Decision = {
   layer: KnowledgeLayer;
   confidence: number;
   relatedNodeIds: string[];
+  supersedes?: string;
+  amends?: string;
   sourceMessageId?: string;
 };
 
@@ -73,6 +90,7 @@ type Project = {
   messages: Message[];
   graph: KnowledgeGraph;
   tradeOffs: TradeOff[];
+  executiveSummary?: string;
   syncIndex: number;
 };
 
@@ -116,11 +134,38 @@ const CATEGORIES: Record<KnowledgeCategory, { label: string; icon: React.Element
 };
 
 const MODELS = [
-  { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro' },
   { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash' },
-  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
-  { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+  { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro' },
 ];
+
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function callGeminiWithRetry(
+  ai: any,
+  params: any,
+  maxRetries = 3,
+  initialDelay = 2000
+) {
+  let lastError: any;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await ai.models.generateContent(params);
+    } catch (error: any) {
+      lastError = error;
+      const errorMsg = error.message || "";
+      const isQuotaError = errorMsg.includes("429") || errorMsg.includes("RESOURCE_EXHAUSTED") || errorMsg.includes("quota");
+      
+      if (isQuotaError && i < maxRetries - 1) {
+        const backoff = initialDelay * Math.pow(2, i);
+        console.warn(`Quota exceeded. Retrying in ${backoff}ms... (Attempt ${i + 1}/${maxRetries})`);
+        await delay(backoff);
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastError;
+}
 
 export default function App() {
   const [projects, setProjects] = useState<Project[]>(() => {
@@ -147,11 +192,16 @@ export default function App() {
 
   const [selectedModel, setSelectedModel] = useState(MODELS[0].id);
   const [modelStatus, setModelStatus] = useState<Record<string, 'ok' | 'quota_exceeded'>>({});
-  const [activeTab, setActiveTab] = useState<'chat' | 'map' | 'decisions' | 'matrix'>('chat');
+  const [activeTab, setActiveTab] = useState<'chat' | 'map' | 'decisions' | 'matrix' | 'diagram'>('chat');
+  const [diagramType, setDiagramType] = useState<'layers' | 'lineage' | 'sequence'>('layers');
+  const [modelComparisonMode, setModelComparisonMode] = useState(false);
+  const [suggestions, setSuggestions] = useState<{ id: string, title: string, description: string, impact: 'high' | 'medium' | 'low' }[]>([]);
+  const [isGeneratingSuggestions, setIsGeneratingSuggestions] = useState(false);
   
   const [messages, setMessages] = useState<Message[]>([]);
   const [graph, setGraph] = useState<KnowledgeGraph>({ nodes: [], decisions: [], conflicts: [] });
   const [tradeOffs, setTradeOffs] = useState<TradeOff[]>([]);
+  const [executiveSummary, setExecutiveSummary] = useState<string | undefined>();
   const lastSyncIndexRef = useRef<number>(0);
 
   // Load current project data
@@ -161,6 +211,7 @@ export default function App() {
       setMessages(project.messages);
       setGraph(project.graph);
       setTradeOffs(project.tradeOffs || []);
+      setExecutiveSummary(project.executiveSummary);
       lastSyncIndexRef.current = project.syncIndex;
     } else if (projects.length > 0) {
       setCurrentProjectId(projects[0].id);
@@ -180,6 +231,7 @@ export default function App() {
         ],
         graph: { nodes: [], decisions: [], conflicts: [] },
         tradeOffs: [],
+        executiveSummary: undefined,
         syncIndex: 0
       };
       setProjects([initialProject]);
@@ -198,6 +250,7 @@ export default function App() {
           messages,
           graph,
           tradeOffs,
+          executiveSummary,
           syncIndex: lastSyncIndexRef.current,
           updatedAt: Date.now()
         };
@@ -220,12 +273,21 @@ export default function App() {
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
+  const [isNewProjectModalOpen, setIsNewProjectModalOpen] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
+  const [newProjectStrategy, setNewProjectStrategy] = useState<'mvp' | 'scale' | 'hybrid'>('mvp');
+  const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
+  const [isAnalyzingGaps, setIsAnalyzingGaps] = useState(false);
+  const [isGeneratingSRS, setIsGeneratingSRS] = useState(false);
+  const [isGeneratingClarity, setIsGeneratingClarity] = useState(false);
   const [extractionError, setExtractionError] = useState<string | null>(null);
-  const [autoSync, setAutoSync] = useState(true);
+  const [autoSync, setAutoSync] = useState(false);
   const [visionMode, setVisionMode] = useState(false); // Vision Mode Toggle
   const [viewMode, setViewMode] = useState<'list' | 'graph'>('list');
+  const [adrViewMode, setAdrViewMode] = useState<'list' | 'lineage'>('list');
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [activeLayer, setActiveLayer] = useState<KnowledgeLayer | 'all'>('all');
+  const [showProjectSettings, setShowProjectSettings] = useState<string | null>(null);
   const [editingNode, setEditingNode] = useState<KnowledgeNode | null>(null);
   const [editingDecision, setEditingDecision] = useState<Decision | null>(null);
 
@@ -270,7 +332,15 @@ export default function App() {
         ${strategyContext}
         Categorize insights into layers: Infrastructure, Data, Logic, Interface, and Cross-cutting. 
         Distinguish between immediate implementation constraints and long-term ambitions. 
-        Ask clarifying questions to verify assumptions. Be technical, concise, and analytical.`
+        Ask clarifying questions to verify assumptions. Be technical, concise, and analytical.
+        
+        When describing system flows or architectures, you are encouraged to use Mermaid diagrams. 
+        Use the following syntax for Mermaid code blocks:
+        \`\`\`mermaid
+        graph TD
+          A --> B
+        \`\`\`
+        The system will automatically render these diagrams for the user.`
       }
     });
   }, [selectedModel, currentProjectId]); // Re-init chat when model or project changes
@@ -292,7 +362,11 @@ export default function App() {
         return;
       }
 
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      // Check for paid key if needed
+      const hasKey = await window.aistudio.hasSelectedApiKey();
+      const apiKey = hasKey ? process.env.API_KEY : process.env.GEMINI_API_KEY;
+      
+      const ai = new GoogleGenAI({ apiKey });
       const conversationText = newMessages.map(m => `[ID: ${m.id}] ${m.role === 'user' ? 'User' : 'Architect'}: ${m.text}`).join('\n\n');
       const currentGraphText = forceFull ? '{"nodes":[],"decisions":[],"conflicts":[]}' : JSON.stringify(graphRef.current);
 
@@ -331,7 +405,7 @@ export default function App() {
       
       Return the COMPLETE updated knowledge graph matching the schema.`;
 
-      const response = await ai.models.generateContent({
+      const response = await callGeminiWithRetry(ai, {
         model: selectedModel,
         contents: prompt,
         config: {
@@ -416,33 +490,291 @@ export default function App() {
     }
   };
 
-  const handleNewProject = () => {
-    const name = prompt('Project Name:', `Project ${projects.length + 1}`);
-    if (!name) return;
+  const handleAnalyzeGaps = async () => {
+    if (!currentProjectId) return;
+    setIsAnalyzingGaps(true);
+    try {
+      const hasKey = await window.aistudio.hasSelectedApiKey();
+      const apiKey = hasKey ? process.env.API_KEY : process.env.GEMINI_API_KEY;
+      const ai = new GoogleGenAI({ apiKey });
+      const currentProject = projects.find(p => p.id === currentProjectId);
+      if (!currentProject) return;
 
-    const strategy = confirm('Optimize for MVP? (Cancel for Scale-first)') ? 'mvp' : 'scale';
+      const prompt = `
+        You are an expert Software Architect. Review the current state of the architecture and identify any gaps, risks, or missing components based on the project strategy (${currentProject.strategy}).
+
+        Current Knowledge Graph:
+        ${JSON.stringify(currentProject.graph, null, 2)}
+
+        Current Trade-offs:
+        ${JSON.stringify(currentProject.tradeOffs, null, 2)}
+
+        Provide a concise, structured Markdown report highlighting:
+        1. Critical Missing Decisions (ADRs needed)
+        2. Unaddressed Risks or Constraints
+        3. Architectural Inconsistencies
+        4. Recommendations for Next Steps
+
+        Keep it professional, actionable, and directly related to the provided data. Do not include a generic introduction, start directly with the report.
+      `;
+
+      const response = await callGeminiWithRetry(ai, {
+        model: 'gemini-3-flash-preview',
+        contents: prompt,
+      });
+
+      const report = response.text;
+
+      if (!report) throw new Error("No report generated");
+
+      const newMessage: Message = {
+        id: Math.random().toString(36).substring(7),
+        role: 'model',
+        text: `**Architecture Gaps Analysis**\n\n${report}`
+      };
+
+      setMessages(prev => [...prev, newMessage]);
+      setActiveTab('chat');
+      
+      setProjects(prev => prev.map(p => 
+        p.id === currentProjectId 
+          ? { ...p, messages: [...p.messages, newMessage], updatedAt: Date.now() }
+          : p
+      ));
+
+    } catch (error) {
+      console.error("Failed to analyze gaps:", error);
+      alert("Failed to analyze gaps. Please try again.");
+    } finally {
+      setIsAnalyzingGaps(false);
+    }
+  };
+
+  const generateExecutiveSummary = async () => {
+    setIsGeneratingSummary(true);
+    try {
+      const hasKey = await window.aistudio.hasSelectedApiKey();
+      const apiKey = hasKey ? process.env.API_KEY : process.env.GEMINI_API_KEY;
+      
+      const ai = new GoogleGenAI({ apiKey });
+      const currentProject = projects.find(p => p.id === currentProjectId);
+      const strategy = currentProject?.strategy || 'mvp';
+
+      const prompt = `Generate a high-level "Executive Summary" for this architecture project.
+      
+      Project Strategy: ${strategy.toUpperCase()}
+      
+      Current Knowledge Map:
+      ${JSON.stringify(graph.nodes.map(n => n.text))}
+      
+      Key Decisions:
+      ${JSON.stringify(graph.decisions.map(d => d.title))}
+      
+      Trade-offs:
+      ${JSON.stringify(tradeOffs.map(t => t.topic))}
+      
+      The summary should explain the "Architecture Story":
+      1. Why we chose this specific direction.
+      2. How it supports the business goals (MVP speed vs Scale robustness).
+      3. Key technical pillars.
+      
+      Keep it professional, concise (2-3 paragraphs), and impactful. Use Markdown formatting.`;
+
+      const response = await callGeminiWithRetry(ai, {
+        model: selectedModel,
+        contents: prompt,
+      });
+
+      const summary = response.text?.trim();
+      if (summary) {
+        setExecutiveSummary(summary);
+      }
+    } catch (error) {
+      console.error("Failed to generate summary:", error);
+    } finally {
+      setIsGeneratingSummary(false);
+    }
+  };
+
+  const handleGenerateSRS = async () => {
+    setIsGeneratingSRS(true);
+    try {
+      const hasKey = await window.aistudio.hasSelectedApiKey();
+      const apiKey = hasKey ? process.env.API_KEY : process.env.GEMINI_API_KEY;
+      
+      const ai = new GoogleGenAI({ apiKey });
+      const currentProject = projects.find(p => p.id === currentProjectId);
+      const strategy = currentProject?.strategy || 'mvp';
+
+      const prompt = `Generate a comprehensive Software Requirements Specification (SRS) report for this architecture project.
+      
+      Project Name: ${currentProject?.name || 'Untitled Project'}
+      Project Strategy: ${strategy.toUpperCase()}
+      
+      Current Knowledge Map:
+      ${JSON.stringify(graph.nodes)}
+      
+      Key Decisions (ADRs):
+      ${JSON.stringify(graph.decisions)}
+      
+      Trade-offs:
+      ${JSON.stringify(tradeOffs)}
+      
+      Conflicts:
+      ${JSON.stringify(graph.conflicts)}
+      
+      The SRS should follow a standard structure:
+      1. Introduction (Purpose, Scope)
+      2. Overall Description (Product Perspective, User Classes, Operating Environment)
+      3. System Features & Requirements (Functional Requirements derived from Use Cases)
+      4. Non-Functional Requirements (Performance, Security, Reliability derived from Constraints/Ambitions)
+      5. System Architecture (High-level overview based on Decisions and Layers)
+      
+      Keep it professional, detailed, and well-structured. Use Markdown formatting.`;
+
+      const response = await callGeminiWithRetry(ai, {
+        model: 'gemini-3.1-pro-preview', // Use Pro model for detailed document generation
+        contents: prompt,
+      });
+
+      const srsContent = response.text?.trim();
+      if (!srsContent) throw new Error("No SRS generated");
+
+      // Download the SRS as a Markdown file
+      const blob = new Blob([srsContent], { type: 'text/markdown' });
+      const url = URL.createObjectURL(blob);
+      const projectName = currentProject ? currentProject.name.toLowerCase().replace(/\s+/g, '-') : 'architecture';
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${projectName}-srs-${new Date().toISOString().split('T')[0]}.md`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+    } catch (error) {
+      console.error("Failed to generate SRS:", error);
+      alert("Failed to generate SRS report. Please try again.");
+    } finally {
+      setIsGeneratingSRS(false);
+    }
+  };
+
+  const handleGenerateClarityReport = async () => {
+    setIsGeneratingClarity(true);
+    try {
+      const hasKey = await window.aistudio.hasSelectedApiKey();
+      const apiKey = hasKey ? process.env.API_KEY : process.env.GEMINI_API_KEY;
+      
+      const ai = new GoogleGenAI({ apiKey });
+      const currentProject = projects.find(p => p.id === currentProjectId);
+
+      const prompt = `Generate an "ADR Clarity & Health Report" for the following Architecture Decision Records (ADRs).
+
+      Project: ${currentProject?.name || 'Untitled'}
+      
+      ADRs:
+      ${JSON.stringify(graph.decisions, null, 2)}
+
+      Please provide a structured Markdown report that includes:
+      1. **Executive Summary**: Overall health of the decision log (how many proposed, accepted, deprecated).
+      2. **Decision Lineage & Evolution**: A clear chronological narrative of how the architecture has evolved, specifically noting which decisions superseded or amended others.
+      3. **Clarity & Completeness Assessment**: Identify any ADRs that are vague, lack clear rationale, have low confidence, or are missing consequences (pros/cons).
+      4. **Risk & Conflict Analysis**: Highlight any contradictory decisions, orphaned decisions (not related to any knowledge nodes), or potential confusion points.
+      5. **Actionable Recommendations**: What should the team do to improve the clarity of their architectural decisions?
+
+      Keep it analytical, objective, and highly structured. Use Markdown formatting.`;
+
+      const response = await callGeminiWithRetry(ai, {
+        model: 'gemini-3.1-pro-preview',
+        contents: prompt,
+      });
+
+      const reportContent = response.text?.trim();
+      if (!reportContent) throw new Error("No report generated");
+
+      const blob = new Blob([reportContent], { type: 'text/markdown' });
+      const url = URL.createObjectURL(blob);
+      const projectName = currentProject ? currentProject.name.toLowerCase().replace(/\s+/g, '-') : 'architecture';
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${projectName}-adr-clarity-${new Date().toISOString().split('T')[0]}.md`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+    } catch (error) {
+      console.error("Failed to generate Clarity Report:", error);
+      alert("Failed to generate Clarity Report. Please try again.");
+    } finally {
+      setIsGeneratingClarity(false);
+    }
+  };
+
+  const handleGenerateSuggestions = async () => {
+    if (messages.length === 0) return;
+    setIsGeneratingSuggestions(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const response = await ai.models.generateContent({
+        model: selectedModel,
+        contents: `Based on the following architectural context, suggest 3-5 strategic architectural improvements or patterns that should be considered.
+        
+        Context:
+        ${JSON.stringify({ nodes: graph.nodes, decisions: graph.decisions })}
+        
+        Return a JSON array of objects with: id, title, description, impact (high/medium/low).`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                id: { type: Type.STRING },
+                title: { type: Type.STRING },
+                description: { type: Type.STRING },
+                impact: { type: Type.STRING, enum: ['high', 'medium', 'low'] }
+              },
+              required: ['id', 'title', 'description', 'impact']
+            }
+          }
+        }
+      });
+
+      const data = JSON.parse(response.text || '[]');
+      setSuggestions(data);
+    } catch (error) {
+      console.error('Failed to generate suggestions:', error);
+    } finally {
+      setIsGeneratingSuggestions(false);
+    }
+  };
+
+  const handleCreateProject = () => {
+    if (!newProjectName.trim()) return;
 
     const newProject: Project = {
       id: Math.random().toString(36).substring(7),
-      name,
-      strategy,
+      name: newProjectName,
+      strategy: newProjectStrategy,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       messages: [
         {
           id: '1',
           role: 'model',
-          text: `Hello! I'm your R&D Architecture Assistant. We are starting a new project: ${name} with a ${strategy} strategy. What kind of system or feature are we designing today?`
+          text: `Hello! I'm your R&D Architecture Assistant. We are starting a new project: ${newProjectName} with a ${newProjectStrategy} strategy. What kind of system or feature are we designing today?`
         }
       ],
       graph: { nodes: [], decisions: [], conflicts: [] },
       tradeOffs: [],
+      executiveSummary: undefined,
       syncIndex: 0
     };
 
     setProjects(prev => [...prev, newProject]);
     setCurrentProjectId(newProject.id);
     setActiveTab('chat');
+    setIsNewProjectModalOpen(false);
+    setNewProjectName('');
   };
 
   const handleUpdateProjectStrategy = (id: string, strategy: 'mvp' | 'scale' | 'hybrid') => {
@@ -464,13 +796,7 @@ export default function App() {
     }
   };
 
-  const handleRenameProject = (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    const project = projects.find(p => p.id === id);
-    if (!project) return;
-    const newName = prompt('New Project Name:', project.name);
-    if (!newName) return;
-
+  const handleRenameProject = (id: string, newName: string) => {
     setProjects(prev => prev.map(p => p.id === id ? { ...p, name: newName } : p));
   };
 
@@ -483,7 +809,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${project.name.toLowerCase().replace(/\s+/g, '-')}-export.json`;
+    a.download = `${project.name.toLowerCase().replace(/\s+/g, '-')}-project-${new Date().toISOString().split('T')[0]}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -517,24 +843,49 @@ export default function App() {
     input.click();
   };
 
-  const handleSend = async () => {
-    if (!input.trim() || isTyping) return;
+  const handleSend = async (overrideInput?: string) => {
+    const textToSend = overrideInput || input;
+    if (!textToSend.trim() || isTyping) return;
 
-    const userMsg: Message = { id: Date.now().toString(), role: 'user', text: input };
+    const userMsg: Message = { id: Date.now().toString(), role: 'user', text: textToSend };
     const newMessages = [...messages, userMsg];
     setMessages(newMessages);
-    setInput('');
+    if (!overrideInput) setInput('');
     setIsTyping(true);
+    setExtractionError(null);
 
     try {
-      const response = await chatRef.current.sendMessage({ message: userMsg.text });
-      const botMsg: Message = { id: (Date.now() + 1).toString(), role: 'model', text: response.text };
-      const updatedMessages = [...newMessages, botMsg];
-      setMessages(updatedMessages);
-      
-      // Trigger background extraction to update the report if autoSync is on
-      if (autoSync) {
-        synthesizeKnowledge(updatedMessages);
+      if (modelComparisonMode) {
+        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const comparisonModels = MODELS.map(m => m.id);
+        
+        const responses = await Promise.all(comparisonModels.map(async (modelId) => {
+          try {
+            const resp = await ai.models.generateContent({
+              model: modelId,
+              contents: userMsg.text
+            });
+            return { model: MODELS.find(m => m.id === modelId)?.name || modelId, text: resp.text || '' };
+          } catch (e) {
+            return { model: modelId, text: 'Error: Failed to get response from this model.' };
+          }
+        }));
+
+        const botMsg: Message = { 
+          id: (Date.now() + 1).toString(), 
+          role: 'model', 
+          text: 'Model Comparison Results:',
+          comparison: responses
+        };
+        const updatedMessages = [...newMessages, botMsg];
+        setMessages(updatedMessages);
+        if (autoSync) synthesizeKnowledge(updatedMessages);
+      } else {
+        const response = await chatRef.current.sendMessage({ message: userMsg.text });
+        const botMsg: Message = { id: (Date.now() + 1).toString(), role: 'model', text: response.text };
+        const updatedMessages = [...newMessages, botMsg];
+        setMessages(updatedMessages);
+        if (autoSync) synthesizeKnowledge(updatedMessages);
       }
     } catch (error: any) {
       console.error("Chat error:", error);
@@ -553,7 +904,10 @@ export default function App() {
   const handleGenerateTradeOff = async (topic: string) => {
     setIsExtracting(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const hasKey = await window.aistudio.hasSelectedApiKey();
+      const apiKey = hasKey ? process.env.API_KEY : process.env.GEMINI_API_KEY;
+      
+      const ai = new GoogleGenAI({ apiKey });
       const currentProject = projects.find(p => p.id === currentProjectId);
       const strategy = currentProject?.strategy || 'mvp';
 
@@ -569,7 +923,7 @@ export default function App() {
         "strategyAlignment": string
       }`;
 
-      const response = await ai.models.generateContent({
+      const response = await callGeminiWithRetry(ai, {
         model: selectedModel,
         contents: prompt,
         config: { responseMimeType: 'application/json' }
@@ -595,15 +949,15 @@ export default function App() {
     const adr = `# ADR-${decision.id.substring(0, 4)}: ${decision.title}
 
 ## Status
-${decision.status.toUpperCase()}
+${(decision.status || 'proposed').toUpperCase()}
 
 ## Date
-${decision.date}
+${decision.date || new Date().toLocaleDateString()}
 
 ## Deciders
-${decision.deciders}
+${decision.deciders || 'Architect'}
 
-## Context and Problem Statement
+${decision.supersedes ? `## Supersedes\nADR-${decision.supersedes.substring(0, 4)}\n\n` : ''}${decision.amends ? `## Amends\nADR-${decision.amends.substring(0, 4)}\n\n` : ''}## Context and Problem Statement
 ${decision.summary}
 
 ## Decision Outcome
@@ -617,7 +971,7 @@ ${(decision.cons || []).map(c => `- ${c}`).join('\n')}
 
 ## Strategy Alignment
 Confidence Score: ${decision.confidence}%
-Layer: ${decision.layer.toUpperCase()}
+Layer: ${(decision.layer || 'unknown').toUpperCase()}
 `;
 
     const blob = new Blob([adr], { type: 'text/markdown' });
@@ -629,10 +983,38 @@ Layer: ${decision.layer.toUpperCase()}
     URL.revokeObjectURL(url);
   };
 
-  const handleExport = () => {
-    const timestamp = new Date().toLocaleString();
-    // Generate Mermaid Diagram
-    let mermaid = '```mermaid\ngraph TD\n';
+  const generateADRLineageMermaid = () => {
+    const decisions = (graph.decisions || []).filter(d => d);
+    if (decisions.length === 0) return 'graph TD\n  Empty[No Decisions Yet]';
+
+    let mermaid = 'graph TD\n';
+    mermaid += '  classDef accepted fill:#00E59922,stroke:#00E599,stroke-width:2px,color:#fff;\n';
+    mermaid += '  classDef proposed fill:#3B82F622,stroke:#3B82F6,stroke-width:2px,color:#fff;\n';
+    mermaid += '  classDef deprecated fill:#EF444422,stroke:#EF4444,stroke-width:2px,color:#fff;\n';
+    mermaid += '  classDef superseded fill:#9CA3AF22,stroke:#9CA3AF,stroke-width:1px,color:#9CA3AF,stroke-dasharray: 5 5;\n';
+
+    decisions.forEach(d => {
+      const shortId = d.id.substring(0, 4).toUpperCase();
+      const title = d.title.replace(/[\[\]\(\)\{\}]/g, '');
+      mermaid += `  ${d.id}["ADR-${shortId}<br/>${title}"]\n`;
+      
+      if (d.status) {
+        mermaid += `  class ${d.id} ${d.status}\n`;
+      }
+
+      if (d.supersedes) {
+        mermaid += `  ${d.id} -- supersedes --> ${d.supersedes}\n`;
+      }
+      if (d.amends) {
+        mermaid += `  ${d.id} -- amends --> ${d.amends}\n`;
+      }
+    });
+
+    return mermaid;
+  };
+
+  const generateMermaid = () => {
+    let mermaid = 'graph TD\n';
     
     // Group nodes by layer
     const layers = [...new Set((graph.nodes || []).filter(n => n).map(n => n.layer))];
@@ -653,27 +1035,89 @@ Layer: ${decision.layer.toUpperCase()}
         }
       });
     });
-    mermaid += '```\n';
+    return mermaid;
+  };
 
-    const md = `# Architecture Synthesis Report
+  const generateSequenceDiagram = () => {
+    const nodes = (graph.nodes || []).filter(n => n);
+    if (nodes.length < 2) return 'sequenceDiagram\n  Note over User, AI: Not enough components for sequence';
+
+    let mermaid = 'sequenceDiagram\n';
+    mermaid += '  autonumber\n';
+    
+    // Pick some nodes to be participants
+    const participants = nodes.slice(0, 5);
+    participants.forEach(p => {
+      mermaid += `  participant ${p.id.replace(/-/g, '_')} as ${p.text.substring(0, 20)}\n`;
+    });
+
+    // Create some mock interactions based on layers
+    for (let i = 0; i < participants.length - 1; i++) {
+      const from = participants[i];
+      const to = participants[i+1];
+      mermaid += `  ${from.id.replace(/-/g, '_')} ->> ${to.id.replace(/-/g, '_')}: Interaction\n`;
+    }
+
+    return mermaid;
+  };
+
+  const handleExport = () => {
+    const timestamp = new Date().toLocaleString();
+    const currentProject = projects.find(p => p.id === currentProjectId);
+    const strategy = currentProject?.strategy || 'mvp';
+    
+    // Generate Mermaid Diagram
+    const mermaidCode = generateMermaid();
+    const mermaid = '```mermaid\n' + mermaidCode + '\n```';
+
+    const md = `# Architecture Synthesis Report: ${currentProject?.name || 'Untitled Project'}
 Generated on: ${timestamp}
+**Strategy Alignment:** ${strategy.toUpperCase()}
+
+${executiveSummary ? `## Executive Summary\n${executiveSummary}\n` : ''}
+
+## Table of Contents
+${executiveSummary ? '1. [Executive Summary](#executive-summary)\n' : ''}${executiveSummary ? '2' : '1'}. [Architecture Diagram](#architecture-diagram)
+${executiveSummary ? '3' : '2'}. [Architecture Decision Records (ADR)](#architecture-decision-records-adr)
+${executiveSummary ? '4' : '3'}. [Trade-off Analysis](#trade-off-analysis)
+${executiveSummary ? '5' : '4'}. [Architectural Conflicts](#architectural-conflicts)
+${executiveSummary ? '6' : '5'}. [Knowledge Map](#knowledge-map)
 
 ## Architecture Diagram
 ${mermaid}
 
-## Decisions
-${(graph.decisions || []).filter(d => d).map(d => `### ${d.title || 'Untitled'}
-**Layer:** ${(d.layer || 'unknown').toUpperCase()}
-**Rationale:** ${d.rationale || 'N/A'}
+## Architecture Decision Records (ADR)
+${(graph.decisions || []).filter(d => d).map(d => `### ADR-${d.id.substring(0, 4)}: ${d.title || 'Untitled'}
+- **Status:** ${(d.status || 'proposed').toUpperCase()}
+- **Date:** ${d.date || 'N/A'}
+- **Deciders:** ${d.deciders || 'N/A'}
+${d.supersedes ? `- **Supersedes:** ADR-${d.supersedes.substring(0, 4)}\n` : ''}${d.amends ? `- **Amends:** ADR-${d.amends.substring(0, 4)}\n` : ''}- **Layer:** ${(d.layer || 'unknown').toUpperCase()}
+- **Confidence:** ${d.confidence}%
 
+#### Context
+${d.summary || 'N/A'}
+
+#### Decision Outcome
+${d.rationale || 'N/A'}
+
+#### Consequences
 **Pros:**
 ${(d.pros || []).map(p => `- ${p}`).join('\n')}
 
 **Cons:**
-${(d.cons || []).map(c => `- ${c}`).join('\n')}
+${(d.cons || []).map(c => `- ${c}`).join('\n')}`).join('\n\n---\n\n')}
 
-**Summary:**
-${d.summary || 'N/A'}`).join('\n\n---\n\n')}
+## Trade-off Analysis
+${(tradeOffs || []).map(t => `### ${t.topic}
+**Recommendation:** ${t.recommendation}
+**Strategy Alignment:** ${t.strategyAlignment}
+
+| Feature | ${t.optionA.name} | ${t.optionB.name} |
+|---------|-------------------|-------------------|
+| **Cost** | ${t.optionA.cost.toUpperCase()} | ${t.optionB.cost.toUpperCase()} |
+| **Complexity** | ${t.optionA.complexity.toUpperCase()} | ${t.optionB.complexity.toUpperCase()} |
+| **Pros** | ${t.optionA.pros.join('<br/>')} | ${t.optionB.pros.join('<br/>')} |
+| **Cons** | ${t.optionA.cons.join('<br/>')} | ${t.optionB.cons.join('<br/>')} |`).join('\n\n')}
 
 ## Architectural Conflicts
 ${(graph.conflicts || []).length > 0 
@@ -682,21 +1126,10 @@ ${(graph.conflicts || []).length > 0
 
 ## Knowledge Map
 ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').toUpperCase()}]** [${(n.layer || 'unknown').toUpperCase()}] ${n.text} (_Status: ${n.status}_)`).join('\n')}
-
-## Trade-off Analysis
-${(tradeOffs || []).map(t => `### ${t.topic}
-**Recommendation:** ${t.recommendation}
-
-| Feature | ${t.optionA.name} | ${t.optionB.name} |
-|---------|-------------------|-------------------|
-| Cost | ${t.optionA.cost} | ${t.optionB.cost} |
-| Complexity | ${t.optionA.complexity} | ${t.optionB.complexity} |
-| Pros | ${t.optionA.pros.join(', ')} | ${t.optionB.pros.join(', ')} |
-| Cons | ${t.optionA.cons.join(', ')} | ${t.optionB.cons.join(', ')} |`).join('\n\n')}`;
+`;
 
     const blob = new Blob([md], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
-    const currentProject = projects.find(p => p.id === currentProjectId);
     const projectName = currentProject ? currentProject.name.toLowerCase().replace(/\s+/g, '-') : 'architecture';
     const a = document.createElement('a');
     a.href = url;
@@ -709,7 +1142,7 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
     window.print();
   };
 
-  const handleClearSession = () => {
+  const handleResetProject = () => {
     if (confirm('Are you sure you want to clear the current project? This will reset all messages and the knowledge map.')) {
       setMessages([
         {
@@ -719,6 +1152,7 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
         }
       ]);
       setGraph({ nodes: [], decisions: [], conflicts: [] });
+      setExecutiveSummary(undefined);
       lastSyncIndexRef.current = 0;
       
       // Re-initialize chat session
@@ -726,7 +1160,7 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
       chatRef.current = ai.chats.create({
         model: selectedModel,
         config: {
-          systemInstruction: "You are an expert System Architect and R&D assistant. Your goal is to help the user synthesize complex system designs. Categorize insights into layers: Infrastructure, Data, Logic, Interface, and Cross-cutting. Distinguish between immediate implementation constraints and long-term ambitions. Ask clarifying questions to verify assumptions. Be technical, concise, and analytical."
+          systemInstruction: "You are an expert System Architect and R&D assistant. Your goal is to help the user synthesize complex system designs. Categorize insights into layers: Infrastructure, Data, Logic, Interface, and Cross-cutting. Distinguish between immediate implementation constraints and long-term ambitions. Ask clarifying questions to verify assumptions. Be technical, concise, and analytical. You are encouraged to use Mermaid diagrams for flows and architectures using ```mermaid syntax."
         }
       });
     }
@@ -752,6 +1186,43 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
     }));
   };
 
+  const handleResolveConflict = (conflict: Conflict) => {
+    if (confirm('Would you like to create an Architecture Decision Record (ADR) to document how this conflict was resolved?')) {
+      const newADR: Decision = {
+        id: Math.random().toString(36).substring(2, 9),
+        title: `Resolve: ${conflict.description.substring(0, 30)}...`,
+        status: 'proposed',
+        date: new Date().toISOString().split('T')[0],
+        deciders: 'Architect',
+        summary: `Resolving conflict: ${conflict.description}`,
+        rationale: 'Describe how this conflict was resolved...',
+        pros: [],
+        cons: [],
+        layer: 'cross-cutting',
+        confidence: 80,
+        relatedNodeIds: conflict.nodeIds || []
+      };
+      setGraph(prev => ({
+        ...prev,
+        decisions: [newADR, ...(prev.decisions || [])],
+        conflicts: (prev.conflicts || []).filter(c => c.id !== conflict.id)
+      }));
+      setEditingDecision(newADR);
+      setActiveTab('decisions');
+    } else {
+      setGraph(prev => ({
+        ...prev,
+        conflicts: (prev.conflicts || []).filter(c => c.id !== conflict.id)
+      }));
+    }
+  };
+
+  const askAiToResolve = (conflict: Conflict) => {
+    const prompt = `I'd like to resolve this architectural conflict: "${conflict.description}". What are our options to reconcile this?`;
+    setActiveTab('chat');
+    handleSend(prompt);
+  };
+
   const handleSaveNode = () => {
     if (!editingNode) return;
     setGraph(prev => ({
@@ -768,6 +1239,50 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
       decisions: (prev.decisions || []).map(d => d && d.id === editingDecision.id ? editingDecision : d)
     }));
     setEditingDecision(null);
+  };
+
+  const handleNewADR = () => {
+    const newADR: Decision = {
+      id: Math.random().toString(36).substring(2, 9),
+      title: 'New Architectural Decision',
+      status: 'proposed',
+      date: new Date().toISOString().split('T')[0],
+      deciders: 'Architect',
+      summary: 'Description of the context and problem...',
+      rationale: 'Why this decision was made...',
+      pros: [],
+      cons: [],
+      layer: 'infrastructure',
+      confidence: 100,
+      relatedNodeIds: []
+    };
+    setGraph(prev => ({
+      ...prev,
+      decisions: [newADR, ...(prev.decisions || [])]
+    }));
+    setEditingDecision(newADR);
+  };
+
+  const handleCreateNewVersion = (oldDecision: Decision) => {
+    const newADR: Decision = {
+      ...oldDecision,
+      id: Math.random().toString(36).substring(2, 9),
+      title: `${oldDecision.title} (v2)`,
+      status: 'proposed',
+      date: new Date().toISOString().split('T')[0],
+      supersedes: oldDecision.id,
+      amends: undefined
+    };
+    
+    // Automatically mark the old one as superseded
+    setGraph(prev => ({
+      ...prev,
+      decisions: [newADR, ...(prev.decisions || []).map(d => 
+        d.id === oldDecision.id ? { ...d, status: 'superseded' as ADRStatus } : d
+      )]
+    }));
+    
+    setEditingDecision(newADR);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -844,18 +1359,37 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
           {activeTab === 'matrix' && <motion.div layoutId="activeTab" className="absolute left-0 w-1 h-6 bg-[#00E599] rounded-r-full" />}
         </button>
 
+        <button 
+          onClick={() => setActiveTab('diagram')}
+          className={cn(
+            "p-3 rounded-xl transition-all duration-200 group relative",
+            activeTab === 'diagram' ? "bg-[#141414] text-[#00E599] shadow-lg shadow-emerald-500/10" : "text-gray-500 hover:text-gray-300 hover:bg-[#111]"
+          )}
+          title="Mermaid Diagram"
+        >
+          <Layout className="w-5 h-5" />
+          {activeTab === 'diagram' && <motion.div layoutId="activeTab" className="absolute left-0 w-1 h-6 bg-[#00E599] rounded-r-full" />}
+        </button>
+
         <div className="mt-auto flex flex-col gap-4">
           <button 
             onClick={handleImportProject}
             className="p-3 rounded-xl text-gray-600 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors"
-            title="Import Project"
+            title="Import Project (JSON)"
           >
-            <Download className="w-5 h-5" />
+            <Upload className="w-5 h-5" />
           </button>
           <button 
-            onClick={handleClearSession}
+            onClick={() => handleExportProject(currentProjectId, {} as any)}
+            className="p-3 rounded-xl text-gray-600 hover:text-blue-400 hover:bg-blue-500/10 transition-colors"
+            title="Export Current Project (JSON)"
+          >
+            <FileJson className="w-5 h-5" />
+          </button>
+          <button 
+            onClick={handleResetProject}
             className="p-3 rounded-xl text-gray-600 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-            title="Clear Current Project"
+            title="Reset Project (Clear Data)"
           >
             <Trash2 className="w-5 h-5" />
           </button>
@@ -867,7 +1401,7 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
         <div className="h-16 flex items-center justify-between px-6 border-b border-[#262626]">
           <h2 className="text-sm font-semibold text-white uppercase tracking-wider">Projects</h2>
           <button 
-            onClick={handleNewProject}
+            onClick={() => setIsNewProjectModalOpen(true)}
             className="p-1.5 rounded-md hover:bg-[#1A1A1A] text-[#00E599] transition-colors"
             title="New Project"
           >
@@ -890,11 +1424,11 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
                 <span className="text-xs font-medium truncate pr-8">{project.name}</span>
                 <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity absolute right-2">
                   <button 
-                    onClick={(e) => handleRenameProject(project.id, e)}
+                    onClick={(e) => { e.stopPropagation(); setShowProjectSettings(project.id); }}
                     className="p-1 hover:text-[#00E599]"
-                    title="Rename"
+                    title="Settings"
                   >
-                    <Edit2 className="w-3 h-3" />
+                    <Settings className="w-3 h-3" />
                   </button>
                   <button 
                     onClick={(e) => handleExportProject(project.id, e)}
@@ -936,6 +1470,7 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
         <button onClick={() => setActiveTab('map')} className={cn("flex-1 py-2 text-xs font-medium rounded-md transition-colors text-center", activeTab === 'map' ? "bg-[#262626] text-white" : "text-gray-500")}>Map</button>
         <button onClick={() => setActiveTab('decisions')} className={cn("flex-1 py-2 text-xs font-medium rounded-md transition-colors text-center", activeTab === 'decisions' ? "bg-[#262626] text-white" : "text-gray-500")}>ADR</button>
         <button onClick={() => setActiveTab('matrix')} className={cn("flex-1 py-2 text-xs font-medium rounded-md transition-colors text-center", activeTab === 'matrix' ? "bg-[#262626] text-white" : "text-gray-500")}>Matrix</button>
+        <button onClick={() => setActiveTab('diagram')} className={cn("flex-1 py-2 text-xs font-medium rounded-md transition-colors text-center", activeTab === 'diagram' ? "bg-[#262626] text-white" : "text-gray-500")}>Diagram</button>
       </div>
 
       {/* LEFT PANE: Chat Sandbox */}
@@ -954,15 +1489,24 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
                 <h1 className="font-semibold text-white text-sm">ArchBot</h1>
                 <span className="text-[10px] text-gray-500 font-mono hidden sm:inline">v2.0</span>
               </div>
-              <select 
-                value={currentProjectId || ''} 
-                onChange={(e) => setCurrentProjectId(e.target.value)}
-                className="lg:hidden bg-transparent text-[10px] text-[#00E599] font-mono focus:outline-none cursor-pointer hover:underline"
-              >
-                {projects.map(p => (
-                  <option key={p.id} value={p.id} className="bg-[#0A0A0A] text-white">{p.name}</option>
-                ))}
-              </select>
+              <div className="flex items-center gap-2 lg:hidden">
+                <select 
+                  value={currentProjectId || ''} 
+                  onChange={(e) => setCurrentProjectId(e.target.value)}
+                  className="bg-transparent text-[10px] text-[#00E599] font-mono focus:outline-none cursor-pointer hover:underline max-w-[100px] truncate"
+                >
+                  {projects.map(p => (
+                    <option key={p.id} value={p.id} className="bg-[#0A0A0A] text-white">{p.name}</option>
+                  ))}
+                </select>
+                <button 
+                  onClick={() => setIsNewProjectModalOpen(true)}
+                  className="p-0.5 rounded bg-[#141414] border border-[#262626] text-[#00E599]"
+                  title="New Project"
+                >
+                  <Plus className="w-3 h-3" />
+                </button>
+              </div>
               <p className="hidden lg:block text-[10px] text-[#00E599] font-mono truncate max-w-[120px]">
                 {projects.find(p => p.id === currentProjectId)?.name}
               </p>
@@ -970,7 +1514,21 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
           </div>
           
           <div className="ml-auto flex items-center gap-3">
-            <div className="relative">
+            <div className="relative flex items-center gap-2">
+              {modelStatus[selectedModel] === 'quota_exceeded' && (
+                <button
+                  onClick={async () => {
+                    await window.aistudio.openSelectKey();
+                    // After selection, we assume success and clear the status
+                    setModelStatus(prev => ({ ...prev, [selectedModel]: 'ok' }));
+                  }}
+                  className="flex items-center gap-1.5 px-2 py-1 rounded bg-amber-500/10 border border-amber-500/30 text-[9px] font-bold text-amber-500 hover:bg-amber-500/20 transition-all uppercase tracking-widest"
+                  title="Switch to a paid API key to avoid quota limits"
+                >
+                  <Shield className="w-3 h-3" />
+                  Use Paid Key
+                </button>
+              )}
               <select
                 value={selectedModel}
                 onChange={(e) => setSelectedModel(e.target.value)}
@@ -993,16 +1551,28 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
             </div>
 
             <button
-              onClick={handleClearSession}
+              onClick={() => setModelComparisonMode(!modelComparisonMode)}
+              className={cn(
+                "flex items-center gap-2 px-2 py-1 rounded border transition-all text-[10px] font-bold uppercase tracking-widest",
+                modelComparisonMode ? "bg-purple-500/10 border-purple-500/30 text-purple-400" : "border-[#262626] text-gray-500 hover:text-gray-300"
+              )}
+              title="Compare responses from multiple models side-by-side"
+            >
+              <Split className="w-3 h-3" />
+              <span className="hidden sm:inline">Compare</span>
+            </button>
+
+            <button
+              onClick={handleResetProject}
               className="text-[10px] font-mono text-gray-500 hover:text-red-400 transition-colors px-2 py-1 rounded hover:bg-red-500/10"
             >
-              CLEAR SESSION
+              RESET PROJECT
             </button>
           </div>
         </div>
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        <div className="flex-1 overflow-y-auto p-3 sm:p-6 space-y-6">
           <AnimatePresence initial={false}>
             {messages.map((msg) => (
               <motion.div
@@ -1016,7 +1586,7 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
                 }}
                 transition={{ duration: 0.3 }}
                 className={cn(
-                  "flex gap-4 max-w-[90%] p-2 rounded-xl transition-colors",
+                  "flex gap-3 sm:gap-4 max-w-[98%] sm:max-w-[90%] p-1 sm:p-2 rounded-xl transition-colors",
                   msg.role === 'user' ? "ml-auto flex-row-reverse" : ""
                 )}
               >
@@ -1027,7 +1597,7 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
                   {msg.role === 'user' ? <User className="w-4 h-4 text-gray-400" /> : <Bot className="w-4 h-4 text-[#00E599]" />}
                 </div>
                 <div className={cn(
-                  "px-5 py-4 rounded-2xl text-[13px] leading-relaxed shadow-sm relative group",
+                  "px-3 sm:px-5 py-3 sm:py-4 rounded-2xl text-[13px] leading-relaxed shadow-sm relative group",
                   msg.role === 'user' 
                     ? "bg-[#141414] border border-[#262626] text-gray-200 rounded-tr-sm" 
                     : "bg-[#111] border border-[#1A1A1A] text-gray-300 rounded-tl-sm"
@@ -1040,8 +1610,48 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
                     {copiedId === msg.id ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
                   </button>
                   {msg.role === 'model' ? (
-                    <div className="markdown-body">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
+                    <div className="space-y-4">
+                      {msg.comparison ? (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {msg.comparison.map((comp, i) => (
+                            <div key={i} className="p-4 rounded-xl bg-[#0A0A0A] border border-[#1A1A1A] space-y-3">
+                              <div className="flex items-center justify-between border-b border-[#1A1A1A] pb-2">
+                                <span className="text-[10px] font-bold text-[#00E599] uppercase tracking-widest">{comp.model}</span>
+                                <button 
+                                  onClick={() => copyToClipboard(comp.text, `${msg.id}-${i}`)}
+                                  className="p-1 rounded hover:bg-gray-800 text-gray-500 hover:text-[#00E599]"
+                                >
+                                  {copiedId === `${msg.id}-${i}` ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                                </button>
+                              </div>
+                              <div className="markdown-body text-xs">
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{comp.text}</ReactMarkdown>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="markdown-body">
+                          <ReactMarkdown 
+                            remarkPlugins={[remarkGfm]}
+                            components={{
+                              code({ node, inline, className, children, ...props }: any) {
+                                const match = /language-mermaid/.exec(className || '');
+                                if (!inline && match) {
+                                  return <Mermaid chart={String(children).replace(/\n$/, '')} enableZoom={false} />;
+                                }
+                                return (
+                                  <code className={className} {...props}>
+                                    {children}
+                                  </code>
+                                );
+                              }
+                            }}
+                          >
+                            {msg.text}
+                          </ReactMarkdown>
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <p className="whitespace-pre-wrap">{msg.text}</p>
@@ -1065,18 +1675,18 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
         </div>
 
         {/* Input Area */}
-        <div className="p-4 border-t border-[#262626] bg-[#0A0A0A] shrink-0">
+        <div className="p-2 sm:p-4 border-t border-[#262626] bg-[#0A0A0A] shrink-0">
           <div className="relative flex items-end bg-[#141414] border border-[#262626] rounded-xl focus-within:border-[#00E599]/50 focus-within:ring-1 focus-within:ring-[#00E599]/50 transition-all">
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Describe your system idea, constraints, or ask a question..."
-              className="w-full max-h-48 min-h-[56px] bg-transparent text-sm text-gray-200 placeholder-gray-600 p-4 pr-12 resize-none focus:outline-none"
+              className="w-full max-h-48 min-h-[56px] bg-transparent text-sm text-gray-200 placeholder-gray-600 p-3 sm:p-4 pr-12 resize-none focus:outline-none"
               rows={1}
             />
             <button
-              onClick={handleSend}
+              onClick={() => handleSend()}
               disabled={!input.trim() || isTyping}
               className="absolute right-2 bottom-2 p-2 rounded-lg bg-[#00E599] text-black hover:bg-[#00c282] disabled:opacity-50 disabled:hover:bg-[#00E599] transition-colors"
             >
@@ -1085,7 +1695,7 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
           </div>
           <div className="mt-2 flex items-center justify-between px-1">
             <div className="flex items-center gap-3">
-              <p className="text-[11px] text-gray-600 font-mono">Shift + Enter for new line</p>
+              <p className="text-[11px] text-gray-600 font-mono hidden sm:block">Shift + Enter for new line</p>
               <button 
                 onClick={() => setAutoSync(!autoSync)}
                 className={cn(
@@ -1140,11 +1750,11 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
               })}
             </div>
           </div>
-          <div className="flex gap-1">
+          <div className="flex gap-1 overflow-x-auto no-scrollbar items-center">
             <button
               onClick={() => setViewMode(viewMode === 'list' ? 'graph' : 'list')}
               className={cn(
-                "w-6 h-6 rounded flex items-center justify-center transition-colors mr-1",
+                "w-6 h-6 rounded flex items-center justify-center transition-colors mr-1 shrink-0",
                 viewMode === 'graph' ? "bg-[#00E599]/20 text-[#00E599] border border-[#00E599]/30" : "bg-gray-800 text-gray-500"
               )}
               title="TOGGLE GRAPH VIEW"
@@ -1154,19 +1764,57 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
             <button
               onClick={() => setVisionMode(!visionMode)}
               className={cn(
-                "w-6 h-6 rounded flex items-center justify-center transition-colors mr-2",
+                "w-6 h-6 rounded flex items-center justify-center transition-colors mr-2 shrink-0",
                 visionMode ? "bg-purple-500/20 text-purple-400 border border-purple-500/30" : "bg-gray-800 text-gray-500"
               )}
               title="VISION MODE (AMBITIONS)"
             >
               <Sparkles className="w-3 h-3" />
             </button>
+            <button
+              onClick={handleAnalyzeGaps}
+              disabled={isAnalyzingGaps}
+              className="flex items-center gap-2 px-2 py-1 rounded border border-[#262626] text-[10px] font-bold uppercase tracking-widest text-amber-500 hover:bg-amber-500/10 hover:border-amber-500/30 transition-all mr-2 disabled:opacity-50 shrink-0"
+              title="Analyze Architecture Gaps"
+            >
+              <AlertTriangle className={cn("w-3 h-3", isAnalyzingGaps && "animate-pulse")} />
+              <span className="hidden sm:inline">{isAnalyzingGaps ? 'Analyzing...' : 'Find Gaps'}</span>
+            </button>
+            <button
+              onClick={handleExport}
+              className="flex items-center gap-2 px-2 py-1 rounded border border-[#262626] text-[10px] font-bold uppercase tracking-widest text-gray-500 hover:text-white hover:border-gray-700 transition-all mr-2 shrink-0"
+              title="Export Full Synthesis Report (Markdown)"
+            >
+              <FileText className="w-3 h-3" />
+              <span className="hidden sm:inline">Report</span>
+            </button>
+            <button
+              onClick={handleGenerateSRS}
+              disabled={isGeneratingSRS}
+              className="flex items-center gap-2 px-2 py-1 rounded border border-[#262626] text-[10px] font-bold uppercase tracking-widest text-blue-500 hover:bg-blue-500/10 hover:border-blue-500/30 transition-all mr-2 disabled:opacity-50 shrink-0"
+              title="Generate Software Requirements Specification (SRS)"
+            >
+              <FileJson className={cn("w-3 h-3", isGeneratingSRS && "animate-pulse")} />
+              <span className="hidden sm:inline">{isGeneratingSRS ? 'Generating...' : 'SRS'}</span>
+            </button>
+            <button
+              onClick={handleGenerateSuggestions}
+              disabled={isGeneratingSuggestions}
+              className={cn(
+                "flex items-center gap-2 px-2 py-1 rounded border transition-all mr-2 disabled:opacity-50 shrink-0 text-[10px] font-bold uppercase tracking-widest",
+                suggestions.length > 0 ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" : "border-[#262626] text-emerald-500 hover:bg-emerald-500/10 hover:border-emerald-500/30"
+              )}
+              title="Get AI Architectural Suggestions"
+            >
+              <Sparkles className={cn("w-3 h-3", isGeneratingSuggestions && "animate-pulse")} />
+              <span className="hidden sm:inline">{isGeneratingSuggestions ? 'Thinking...' : 'Suggestions'}</span>
+            </button>
             {['all', ...LAYERS.map(l => l.id)].map((l) => (
               <button
                 key={l}
                 onClick={() => setActiveLayer(l as any)}
                 className={cn(
-                  "w-6 h-6 rounded flex items-center justify-center transition-colors",
+                  "w-6 h-6 rounded flex items-center justify-center transition-colors shrink-0",
                   activeLayer === l ? "bg-[#1A1A1A] text-[#00E599]" : "text-gray-600 hover:text-gray-400"
                 )}
                 title={l.toUpperCase()}
@@ -1186,14 +1834,45 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
                   <AlertTriangle className="w-3.5 h-3.5" />
                   <span className="text-[10px] font-bold uppercase tracking-wider">Architectural Conflicts Detected</span>
                 </div>
-                <div className="space-y-1.5">
+                <div className="space-y-2">
                   {(graph.conflicts || []).map(conflict => (
-                    <div key={conflict.id} className="text-[11px] text-gray-400 flex gap-2">
-                      <span className={cn(
-                        "shrink-0 w-1 h-1 rounded-full mt-1.5",
-                        conflict.severity === 'high' ? "bg-red-500" : "bg-amber-500"
-                      )} />
-                      {conflict.description}
+                    <div key={conflict.id} className="group flex items-start justify-between gap-3 p-2.5 rounded-xl bg-red-500/5 hover:bg-red-500/10 transition-all border border-red-500/10 hover:border-red-500/20 shadow-sm">
+                      <div className="space-y-1 flex-1">
+                        <div className="text-[11px] text-gray-300 flex gap-2 leading-relaxed">
+                          <span className={cn(
+                            "shrink-0 w-1.5 h-1.5 rounded-full mt-1.5",
+                            conflict.severity === 'high' ? "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]" : "bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.5)]"
+                          )} />
+                          {conflict.description}
+                        </div>
+                        <div className="flex items-center gap-2 pl-3.5">
+                          {conflict.nodeIds.map(nid => {
+                            const node = graph.nodes.find(n => n.id === nid);
+                            if (!node) return null;
+                            return (
+                              <span key={nid} className="text-[9px] font-mono text-gray-600 bg-black/20 px-1 rounded">
+                                {node.text.substring(0, 10)}...
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                        <button 
+                          onClick={() => askAiToResolve(conflict)}
+                          className="p-1.5 rounded-lg hover:bg-red-500/20 text-red-400/60 hover:text-red-400 transition-colors"
+                          title="Ask Architect to help resolve"
+                        >
+                          <MessageSquare className="w-3.5 h-3.5" />
+                        </button>
+                        <button 
+                          onClick={() => handleResolveConflict(conflict)}
+                          className="p-1.5 rounded-lg hover:bg-red-500/20 text-red-400/60 hover:text-red-400 transition-colors"
+                          title="Dismiss warning"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1206,96 +1885,237 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
               <KnowledgeGraphView 
                 nodes={graph.nodes} 
                 decisions={graph.decisions} 
+                conflicts={graph.conflicts}
                 onNodeClick={scrollToMessage} 
               />
             </div>
           ) : (
-            LAYERS.filter(l => activeLayer === 'all' || activeLayer === l.id).map(layer => {
-              const layerNodes = graph.nodes.filter(n => {
-                if (!n) return false;
-                const layerMatch = n.layer === layer.id;
-                const visionMatch = visionMode ? n.status === 'ambitious' : n.status !== 'ambitious';
-                return layerMatch && visionMatch;
-              });
-              if (layerNodes.length === 0 && activeLayer !== layer.id) return null;
+            graph.nodes.length > 0 ? (
+              LAYERS.filter(l => activeLayer === 'all' || activeLayer === l.id).map(layer => {
+                const layerNodes = graph.nodes.filter(n => {
+                  if (!n) return false;
+                  const layerMatch = n.layer === layer.id;
+                  const visionMatch = visionMode ? n.status === 'ambitious' : n.status !== 'ambitious';
+                  return layerMatch && visionMatch;
+                });
+                if (layerNodes.length === 0 && activeLayer !== layer.id) return null;
 
-              return (
-                <div key={layer.id} className="space-y-3">
-                  <div className="flex items-center gap-2 px-2">
-                    <layer.icon className={cn("w-3.5 h-3.5", layer.color)} />
-                    <span className="text-[11px] font-bold uppercase tracking-wider text-gray-500">{layer.label}</span>
-                    <div className="flex-1 h-[1px] bg-[#1A1A1A]" />
-                  </div>
-                  <div className="space-y-2">
-                    {layerNodes.length > 0 ? layerNodes.map(node => {
-                      const CatIcon = (CATEGORIES as any)[node.category]?.icon || Target;
-                      return (
-                        <motion.div
-                          key={node.id}
-                          layout
-                          initial={{ opacity: 0 }}
-                          animate={{ opacity: 1 }}
-                          onClick={() => node.sourceMessageId && scrollToMessage(node.sourceMessageId)}
-                          className={cn(
-                            "group relative p-4 tech-card cursor-pointer",
-                            node.status === 'ambitious' && "border-dashed border-purple-500/30 bg-purple-500/5"
-                          )}
-                        >
-                          <div className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 bg-[#111] pl-2 rounded-bl-lg z-10">
-                            <button onClick={(e) => { e.stopPropagation(); setEditingNode(node); }} className="p-1.5 rounded hover:bg-[#1A1A1A] text-gray-500 hover:text-blue-400 transition-colors" title="Edit insight"><Edit2 className="w-3.5 h-3.5" /></button>
-                            <button onClick={(e) => { e.stopPropagation(); handleDeleteNode(node.id); }} className="p-1.5 rounded hover:bg-[#1A1A1A] text-gray-500 hover:text-red-400 transition-colors" title="Delete insight"><Trash2 className="w-3.5 h-3.5" /></button>
-                          </div>
-                          <div className="flex items-start gap-4">
-                            <div className={cn(
-                              "mt-0.5 p-2 rounded-xl bg-[#141414] border border-[#262626] text-gray-500 group-hover:text-gray-300 transition-colors",
-                              node.status === 'ambitious' && "text-purple-400 border-purple-500/20"
-                            )}>
-                              <CatIcon className="w-3.5 h-3.5" />
+                return (
+                  <div key={layer.id} className="space-y-3">
+                    <div className="flex items-center gap-2 px-2">
+                      <layer.icon className={cn("w-3.5 h-3.5", layer.color)} />
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-gray-500">{layer.label}</span>
+                      <div className="flex-1 h-[1px] bg-[#1A1A1A]" />
+                    </div>
+                    <div className="space-y-2">
+                      {layerNodes.length > 0 ? layerNodes.map(node => {
+                        const CatIcon = (CATEGORIES as any)[node.category]?.icon || Target;
+                        return (
+                          <motion.div
+                            key={node.id}
+                            layout
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            onClick={() => node.sourceMessageId && scrollToMessage(node.sourceMessageId)}
+                            className={cn(
+                              "group relative p-4 tech-card cursor-pointer",
+                              node.status === 'ambitious' && "border-dashed border-purple-500/30 bg-purple-500/5"
+                            )}
+                          >
+                            <div className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 bg-[#111] pl-2 rounded-bl-lg z-10">
+                              <button onClick={(e) => { e.stopPropagation(); setEditingNode(node); }} className="p-1.5 rounded hover:bg-[#1A1A1A] text-gray-500 hover:text-blue-400 transition-colors" title="Edit insight"><Edit2 className="w-3.5 h-3.5" /></button>
+                              <button onClick={(e) => { e.stopPropagation(); handleDeleteNode(node.id); }} className="p-1.5 rounded hover:bg-[#1A1A1A] text-gray-500 hover:text-red-400 transition-colors" title="Delete insight"><Trash2 className="w-3.5 h-3.5" /></button>
                             </div>
-                            <div className="flex-1 min-w-0">
-                              <p className="text-[13px] text-gray-300 leading-snug font-medium">{node.text}</p>
-                              <div className="mt-3 flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                  <span className={cn(
-                                    "text-[9px] font-mono uppercase px-1.5 py-0.5 rounded",
-                                    node.status === 'verified' ? "bg-emerald-500/10 text-emerald-500" :
-                                    node.status === 'ambitious' ? "bg-purple-500/10 text-purple-400" :
-                                    node.status === 'discarded' ? "bg-red-500/10 text-red-400" :
-                                    "bg-gray-800 text-gray-500"
-                                  )}>
-                                    {node.status}
-                                  </span>
-                                  <span className="text-[9px] text-gray-600 font-mono uppercase tracking-tight">{node.category}</span>
-                                </div>
-                                <div className="flex items-center gap-2">
-                                  <div className="w-14 h-1 bg-gray-900 rounded-full overflow-hidden border border-[#1A1A1A]">
-                                    <div 
-                                      className={cn(
-                                        "h-full transition-all duration-700",
-                                        node.confidence > 80 ? "bg-emerald-500" :
-                                        node.confidence > 50 ? "bg-amber-500" :
-                                        "bg-red-500"
-                                      )}
-                                      style={{ width: `${node.confidence}%` }}
-                                    />
+                            <div className="flex items-start gap-4">
+                              <div className={cn(
+                                "mt-0.5 p-2 rounded-xl bg-[#141414] border border-[#262626] text-gray-500 group-hover:text-gray-300 transition-colors",
+                                node.status === 'ambitious' && "text-purple-400 border-purple-500/20"
+                              )}>
+                                <CatIcon className="w-3.5 h-3.5" />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-[13px] text-gray-300 leading-snug font-medium">{node.text}</p>
+                                <div className="mt-3 flex items-center justify-between">
+                                  <div className="flex items-center gap-2">
+                                    <span className={cn(
+                                      "text-[9px] font-mono uppercase px-1.5 py-0.5 rounded",
+                                      node.status === 'verified' ? "bg-emerald-500/10 text-emerald-500" :
+                                      node.status === 'ambitious' ? "bg-purple-500/10 text-purple-400" :
+                                      node.status === 'discarded' ? "bg-red-500/10 text-red-400" :
+                                      "bg-gray-800 text-gray-500"
+                                    )}>
+                                      {node.status}
+                                    </span>
+                                    <span className="text-[9px] text-gray-600 font-mono uppercase tracking-tight">{node.category}</span>
                                   </div>
-                                  <span className="text-[8px] font-mono text-gray-600">{node.confidence}%</span>
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-14 h-1 bg-gray-900 rounded-full overflow-hidden border border-[#1A1A1A]">
+                                      <div 
+                                        className={cn(
+                                          "h-full transition-all duration-700",
+                                          node.confidence > 80 ? "bg-emerald-500" :
+                                          node.confidence > 50 ? "bg-amber-500" :
+                                          "bg-red-500"
+                                        )}
+                                        style={{ width: `${node.confidence}%` }}
+                                      />
+                                    </div>
+                                    <span className="text-[8px] font-mono text-gray-600">{node.confidence}%</span>
+                                  </div>
                                 </div>
                               </div>
                             </div>
+                          </motion.div>
+                        );
+                      }) : (
+                        activeLayer === layer.id && (
+                          <div className="p-8 border border-dashed border-[#1A1A1A] rounded-xl flex flex-col items-center justify-center text-center space-y-2">
+                            <layer.icon className="w-6 h-6 text-gray-700" />
+                            <p className="text-xs text-gray-600">No {layer.label.toLowerCase()} insights extracted yet.</p>
                           </div>
-                        </motion.div>
-                      );
-                    }) : (
-                      <div className="py-4 px-2 border border-dashed border-[#1A1A1A] rounded-xl bg-[#111]/20 flex flex-col items-center justify-center text-center">
-                        <p className="text-[10px] text-gray-700 font-mono uppercase tracking-widest">Awaiting Data</p>
-                      </div>
-                    )}
+                        )
+                      )}
+                    </div>
                   </div>
+                );
+              })
+            ) : (
+              <div className="flex-1 flex flex-col items-center justify-center text-center p-12 space-y-4">
+                <div className="w-16 h-16 rounded-full bg-[#141414] border border-[#262626] flex items-center justify-center">
+                  <Layers className="w-8 h-8 text-gray-700" />
                 </div>
-              );
-            })
+                <div className="max-w-xs space-y-2">
+                  <h3 className="text-white font-medium">Knowledge Map Empty</h3>
+                  <p className="text-xs text-gray-500 leading-relaxed">
+                    Start chatting with ArchBot to extract architectural insights, constraints, and system design elements.
+                  </p>
+                </div>
+                <button 
+                  onClick={() => setActiveTab('chat')}
+                  className="px-4 py-2 rounded-lg bg-[#141414] border border-[#262626] text-xs font-medium text-[#00E599] hover:bg-[#1A1A1A] transition-colors"
+                >
+                  Go to Chat
+                </button>
+              </div>
+            )
           )}
+        </div>
+
+        {/* AI Suggestions Side Panel */}
+        <AnimatePresence>
+          {suggestions.length > 0 && (
+            <motion.div
+              initial={{ x: 400, opacity: 0 }}
+              animate={{ x: 0, opacity: 1 }}
+              exit={{ x: 400, opacity: 0 }}
+              className="absolute top-16 bottom-0 right-0 w-80 border-l border-[#262626] bg-[#0A0A0A] flex flex-col shrink-0 z-30 shadow-2xl"
+            >
+              <div className="h-16 flex items-center justify-between px-6 border-b border-[#262626]">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-emerald-400" />
+                  <h3 className="text-xs font-bold text-white uppercase tracking-widest">AI Suggestions</h3>
+                </div>
+                <button onClick={() => setSuggestions([])} className="text-gray-500 hover:text-white">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                {suggestions.map((suggestion, idx) => (
+                  <motion.div
+                    key={suggestion.id}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: idx * 0.1 }}
+                    className="p-4 rounded-2xl bg-[#141414] border border-[#262626] hover:border-emerald-500/30 transition-all group"
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <span className={cn(
+                        "text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full",
+                        suggestion.impact === 'high' ? "bg-red-500/10 text-red-400" :
+                        suggestion.impact === 'medium' ? "bg-amber-500/10 text-amber-400" :
+                        "bg-blue-500/10 text-blue-400"
+                      )}>
+                        {suggestion.impact} Impact
+                      </span>
+                    </div>
+                    <h4 className="text-sm font-bold text-white mb-2 group-hover:text-emerald-400 transition-colors">{suggestion.title}</h4>
+                    <p className="text-xs text-gray-500 leading-relaxed mb-4">{suggestion.description}</p>
+                    <button 
+                      onClick={() => handleSend(`Tell me more about implementing ${suggestion.title}`)}
+                      className="w-full py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-[10px] font-bold text-emerald-400 uppercase tracking-widest hover:bg-emerald-500/20 transition-all"
+                    >
+                      Explore Pattern
+                    </button>
+                  </motion.div>
+                ))}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* DIAGRAM VIEW */}
+      <div className={cn(
+        "flex-col w-full border-r border-[#262626] bg-[#0A0A0A] h-full min-h-0",
+        activeTab === 'diagram' ? "flex flex-1" : "hidden"
+      )}>
+        <div className="h-16 flex items-center justify-between px-4 sm:px-6 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
+          <div className="flex items-center gap-2 sm:gap-4 shrink-0">
+            <Layout className="w-4 h-4 text-gray-400" />
+            <h2 className="text-sm font-medium text-white uppercase tracking-widest">Architecture Diagram</h2>
+            <div className="h-4 w-px bg-[#262626] mx-2" />
+            <div className="flex items-center gap-1 bg-[#141414] p-1 rounded-xl border border-[#262626]">
+              <button 
+                onClick={() => setDiagramType('layers')}
+                className={cn(
+                  "px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all",
+                  diagramType === 'layers' ? "bg-[#00E599] text-black" : "text-gray-500 hover:text-gray-300"
+                )}
+              >
+                Layers
+              </button>
+              <button 
+                onClick={() => setDiagramType('lineage')}
+                className={cn(
+                  "px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all",
+                  diagramType === 'lineage' ? "bg-[#00E599] text-black" : "text-gray-500 hover:text-gray-300"
+                )}
+              >
+                Lineage
+              </button>
+              <button 
+                onClick={() => setDiagramType('sequence')}
+                className={cn(
+                  "px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest transition-all",
+                  diagramType === 'sequence' ? "bg-[#00E599] text-black" : "text-gray-500 hover:text-gray-300"
+                )}
+              >
+                Sequence
+              </button>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+             <button
+              onClick={handleExport}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-[#262626] text-[10px] font-bold uppercase tracking-widest text-gray-400 hover:text-white hover:border-gray-700 transition-all"
+            >
+              <Download className="w-3 h-3" />
+              <span className="hidden sm:inline">Export</span>
+            </button>
+          </div>
+        </div>
+        <div className="flex-1 overflow-hidden p-4 sm:p-8 flex items-center justify-center bg-[#050505]">
+          <div className="w-full h-full bg-[#050505] rounded-2xl border border-[#1A1A1A] shadow-2xl overflow-hidden">
+            {activeTab === 'diagram' && (
+              <Mermaid 
+                chart={
+                  diagramType === 'layers' ? generateMermaid() : 
+                  diagramType === 'lineage' ? generateADRLineageMermaid() : 
+                  generateSequenceDiagram()
+                } 
+              />
+            )}
+          </div>
         </div>
       </div>
 
@@ -1304,12 +2124,41 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
         "flex-col bg-[#0A0A0A] w-full h-full min-h-0",
         activeTab === 'decisions' ? "flex flex-1" : "hidden"
       )}>
-        <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0">
-          <div className="hidden sm:flex items-center gap-2">
-            <ListChecks className="w-4 h-4 text-gray-400" />
-            <h2 className="text-sm font-medium text-white">ADR Manager</h2>
+        <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
+          <div className="flex items-center gap-4 shrink-0">
+            <div className="hidden sm:flex items-center gap-2">
+              <ListChecks className="w-4 h-4 text-gray-400" />
+              <h2 className="text-sm font-medium text-white">ADR Manager</h2>
+            </div>
+            <div className="flex items-center bg-[#141414] rounded-lg p-1 border border-[#262626]">
+              <button
+                onClick={() => setAdrViewMode('list')}
+                className={cn(
+                  "px-3 py-1 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all",
+                  adrViewMode === 'list' ? "bg-[#00E599] text-black" : "text-gray-500 hover:text-gray-300"
+                )}
+              >
+                List
+              </button>
+              <button
+                onClick={() => setAdrViewMode('lineage')}
+                className={cn(
+                  "px-3 py-1 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all",
+                  adrViewMode === 'lineage' ? "bg-[#00E599] text-black" : "text-gray-500 hover:text-gray-300"
+                )}
+              >
+                Lineage
+              </button>
+            </div>
           </div>
-          <div className="flex items-center gap-2 md:gap-3 w-full sm:w-auto justify-between sm:justify-end">
+          <div className="flex items-center gap-2 md:gap-3 shrink-0">
+            <button
+              onClick={handleNewADR}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-[#00E599] text-black text-xs font-bold hover:bg-[#00CC88] transition-colors"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">New ADR</span>
+            </button>
             <button
               onClick={() => synthesizeKnowledge(messages, 0, true)}
               disabled={isExtracting}
@@ -1319,7 +2168,7 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
               )}
             >
               <Sparkles className={cn("w-3.5 h-3.5", isExtracting && "animate-pulse")} />
-              {isExtracting ? 'Synthesizing...' : 'Synthesize'}
+              <span className="hidden sm:inline">{isExtracting ? 'Synthesizing...' : 'Synthesize'}</span>
             </button>
             <button
               onClick={handleExport}
@@ -1327,132 +2176,226 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
               title="Export Full Report"
             >
               <FileText className="w-3.5 h-3.5" />
-              Report
+              <span className="hidden sm:inline">Report</span>
+            </button>
+            <button
+              onClick={handleGenerateSRS}
+              disabled={isGeneratingSRS}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-blue-500/30 text-xs font-medium text-blue-400 hover:bg-blue-500/10 transition-colors disabled:opacity-50"
+              title="Generate Software Requirements Specification"
+            >
+              <FileJson className={cn("w-3.5 h-3.5", isGeneratingSRS && "animate-pulse")} />
+              <span className="hidden sm:inline">{isGeneratingSRS ? 'Generating...' : 'SRS'}</span>
+            </button>
+            <button
+              onClick={handleGenerateClarityReport}
+              disabled={isGeneratingClarity}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-purple-500/30 text-xs font-medium text-purple-400 hover:bg-purple-500/10 transition-colors disabled:opacity-50"
+              title="Generate ADR Clarity & Health Report"
+            >
+              <Activity className={cn("w-3.5 h-3.5", isGeneratingClarity && "animate-pulse")} />
+              <span className="hidden sm:inline">{isGeneratingClarity ? 'Analyzing...' : 'Clarity Report'}</span>
             </button>
           </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-8">
           <div className="max-w-3xl mx-auto space-y-8">
-            {(graph.decisions || []).length > 0 ? (
-              (graph.decisions || []).map((decision, idx) => {
-                if (!decision) return null;
-                const layer = LAYERS.find(l => l.id === decision.layer);
-                return (
-                  <motion.div
-                    key={decision.id}
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: idx * 0.1 }}
-                    className="tech-card overflow-hidden group border-[#262626]"
-                  >
-                    <div className="p-6 space-y-6">
-                      <div className="flex items-start justify-between">
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-2">
-                            <span className="text-[10px] font-mono text-gray-500">ADR-{decision.id.substring(0, 4).toUpperCase()}</span>
-                            <span className={cn(
-                              "text-[9px] font-mono uppercase px-1.5 py-0.5 rounded",
-                              decision.status === 'accepted' ? "bg-emerald-500/10 text-emerald-500" :
-                              decision.status === 'proposed' ? "bg-blue-500/10 text-blue-400" :
-                              "bg-red-500/10 text-red-400"
-                            )}>
-                              {decision.status || 'proposed'}
-                            </span>
-                          </div>
-                          <h3 className="text-lg font-bold text-white">{decision.title}</h3>
-                        </div>
-                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <button onClick={() => handleExportADR(decision)} className="p-1.5 rounded hover:bg-[#1A1A1A] text-gray-600 hover:text-emerald-400 transition-colors" title="Export ADR"><Download className="w-3.5 h-3.5" /></button>
-                          <button onClick={() => setEditingDecision(decision)} className="p-1.5 rounded hover:bg-[#1A1A1A] text-gray-600 hover:text-blue-400 transition-colors" title="Edit ADR"><Edit2 className="w-3.5 h-3.5" /></button>
-                          <button onClick={() => handleDeleteDecision(decision.id)} className="p-1.5 rounded hover:bg-[#1A1A1A] text-gray-600 hover:text-red-400 transition-colors" title="Delete ADR"><Trash2 className="w-3.5 h-3.5" /></button>
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-4 text-[11px] font-mono">
-                        <div className="p-3 rounded-lg bg-[#050505] border border-[#1A1A1A]">
-                          <p className="text-gray-600 uppercase mb-1">Date</p>
-                          <p className="text-gray-300">{decision.date || new Date().toLocaleDateString()}</p>
-                        </div>
-                        <div className="p-3 rounded-lg bg-[#050505] border border-[#1A1A1A]">
-                          <p className="text-gray-600 uppercase mb-1">Deciders</p>
-                          <p className="text-gray-300 truncate">{decision.deciders || 'Architect'}</p>
-                        </div>
-                      </div>
-
-                      <div className="space-y-4">
-                        <div className="space-y-2">
-                          <p className="text-[10px] font-bold uppercase text-gray-600 tracking-widest">Context</p>
-                          <p className="text-[13px] text-gray-400 leading-relaxed">{decision.summary}</p>
-                        </div>
-                        <div className="space-y-2">
-                          <p className="text-[10px] font-bold uppercase text-gray-600 tracking-widest">Decision Outcome</p>
-                          <p className="text-[13px] text-gray-300 leading-relaxed">{decision.rationale}</p>
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-6">
-                        <div className="space-y-2">
-                          <p className="text-[10px] font-bold uppercase text-emerald-500/70 tracking-widest">Consequences (Pros)</p>
-                          <ul className="space-y-1">
-                            {(decision.pros || []).map((p, i) => (
-                              <li key={i} className="text-[12px] text-gray-400 flex items-start gap-2">
-                                <Check className="w-3 h-3 text-emerald-500 mt-1 shrink-0" />
-                                <span>{p}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                        <div className="space-y-2">
-                          <p className="text-[10px] font-bold uppercase text-red-500/70 tracking-widest">Consequences (Cons)</p>
-                          <ul className="space-y-1">
-                            {(decision.cons || []).map((c, i) => (
-                              <li key={i} className="text-[12px] text-gray-400 flex items-start gap-2">
-                                <X className="w-3 h-3 text-red-500 mt-1 shrink-0" />
-                                <span>{c}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      </div>
-
-                      <div className="pt-4 border-t border-[#1A1A1A] flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          <span className={cn("text-[9px] font-mono uppercase px-2 py-0.5 rounded-full border", layer?.color.replace('text', 'border') || 'border-gray-800')}>
-                            {decision.layer}
-                          </span>
-                          <div className="flex items-center gap-2">
-                            <div className="w-16 h-1 bg-gray-900 rounded-full overflow-hidden">
-                              <div className={cn("h-full", decision.confidence > 80 ? "bg-emerald-500" : "bg-amber-500")} style={{ width: `${decision.confidence}%` }} />
-                            </div>
-                            <span className="text-[9px] font-mono text-gray-600">{decision.confidence}% Confidence</span>
-                          </div>
-                        </div>
-                        {decision.sourceMessageId && (
-                          <button onClick={() => scrollToMessage(decision.sourceMessageId!)} className="text-[10px] font-mono text-gray-600 hover:text-[#00E599] flex items-center gap-1 transition-colors">
-                            <Link2 className="w-3 h-3" />
-                            Source
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </motion.div>
-                );
-              })
-            ) : (
-              <div className="flex flex-col items-center justify-center h-80 text-center border border-dashed border-[#262626] rounded-3xl bg-[#111]/30 p-10">
-                <div className="w-16 h-16 rounded-2xl bg-[#141414] border border-[#262626] flex items-center justify-center mb-6 shadow-inner">
-                  <Target className="w-8 h-8 text-gray-700" />
+            {/* Executive Summary Section */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mb-12 p-8 rounded-2xl bg-[#050505] border border-[#1A1A1A] relative overflow-hidden group"
+            >
+              <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500/50" />
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400">
+                    <Sparkles className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white uppercase tracking-widest">Executive Summary</h3>
+                    <p className="text-[10px] text-gray-500 uppercase font-mono tracking-tight">The Architecture Story</p>
+                  </div>
                 </div>
-                <h3 className="text-white font-medium mb-2 text-lg">Awaiting Synthesis</h3>
-                <p className="text-sm text-gray-500 max-w-xs leading-relaxed">
-                  As your architectural conversation evolves, ArchBot will distill insights into finalized decisions and trade-offs here.
-                </p>
-                <div className="mt-8 flex items-center gap-2 text-[10px] font-mono text-gray-700 uppercase tracking-widest">
-                  <Activity className="w-3 h-3" />
-                  <span>Real-time analysis active</span>
-                </div>
+                <button
+                  onClick={generateExecutiveSummary}
+                  disabled={isGeneratingSummary}
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-[#262626] text-[10px] font-bold uppercase tracking-widest text-gray-400 hover:text-white hover:border-gray-700 transition-all disabled:opacity-50"
+                >
+                  <RefreshCw className={cn("w-3 h-3", isGeneratingSummary && "animate-spin")} />
+                  {executiveSummary ? 'Regenerate' : 'Generate'}
+                </button>
               </div>
+
+              {isGeneratingSummary ? (
+                <div className="space-y-3 animate-pulse">
+                  <div className="h-4 bg-gray-900 rounded w-3/4" />
+                  <div className="h-4 bg-gray-900 rounded w-1/2" />
+                  <div className="h-4 bg-gray-900 rounded w-5/6" />
+                </div>
+              ) : executiveSummary ? (
+                <div className="markdown-body prose prose-invert prose-sm max-w-none text-gray-400 leading-relaxed">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{executiveSummary}</ReactMarkdown>
+                </div>
+              ) : (
+                <div className="text-center py-8">
+                  <p className="text-xs text-gray-600 italic">No summary generated yet. Click generate to synthesize your architecture story.</p>
+                </div>
+              )}
+            </motion.div>
+
+            {adrViewMode === 'lineage' ? (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.98 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="w-full aspect-video bg-[#050505] rounded-2xl border border-[#1A1A1A] p-4 shadow-2xl overflow-hidden"
+              >
+                <div className="w-full h-full">
+                  {activeTab === 'decisions' && <Mermaid chart={generateADRLineageMermaid()} />}
+                </div>
+              </motion.div>
+            ) : (
+              (graph.decisions || []).length > 0 ? (
+                (graph.decisions || []).map((decision, idx) => {
+                  if (!decision) return null;
+                  const layer = LAYERS.find(l => l.id === decision.layer);
+                  return (
+                    <motion.div
+                      key={decision.id}
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: idx * 0.1 }}
+                      className="tech-card overflow-hidden group border-[#262626]"
+                    >
+                      <div className="p-6 space-y-6">
+                        <div className="flex items-start justify-between">
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] font-mono text-gray-500">ADR-{decision.id.substring(0, 4).toUpperCase()}</span>
+                              <span className={cn(
+                                "text-[9px] font-mono uppercase px-1.5 py-0.5 rounded",
+                                decision.status === 'accepted' ? "bg-emerald-500/10 text-emerald-500" :
+                                decision.status === 'proposed' ? "bg-blue-500/10 text-blue-400" :
+                                decision.status === 'superseded' ? "bg-gray-500/10 text-gray-500" :
+                                "bg-red-500/10 text-red-400"
+                              )}>
+                                {decision.status || 'proposed'}
+                              </span>
+                            </div>
+                            <h3 className="text-lg font-bold text-white">{decision.title}</h3>
+                          </div>
+                          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button onClick={() => handleCreateNewVersion(decision)} className="p-1.5 rounded hover:bg-[#1A1A1A] text-gray-600 hover:text-purple-400 transition-colors" title="Create New Version (Supersede)"><RefreshCw className="w-3.5 h-3.5" /></button>
+                            <button onClick={() => handleExportADR(decision)} className="p-1.5 rounded hover:bg-[#1A1A1A] text-gray-600 hover:text-emerald-400 transition-colors" title="Export ADR"><Download className="w-3.5 h-3.5" /></button>
+                            <button onClick={() => setEditingDecision(decision)} className="p-1.5 rounded hover:bg-[#1A1A1A] text-gray-600 hover:text-blue-400 transition-colors" title="Edit ADR"><Edit2 className="w-3.5 h-3.5" /></button>
+                            <button onClick={() => handleDeleteDecision(decision.id)} className="p-1.5 rounded hover:bg-[#1A1A1A] text-gray-600 hover:text-red-400 transition-colors" title="Delete ADR"><Trash2 className="w-3.5 h-3.5" /></button>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-[11px] font-mono">
+                          <div className="p-3 rounded-lg bg-[#050505] border border-[#1A1A1A]">
+                            <p className="text-gray-600 uppercase mb-1">Date</p>
+                            <p className="text-gray-300">{decision.date || new Date().toLocaleDateString()}</p>
+                          </div>
+                          <div className="p-3 rounded-lg bg-[#050505] border border-[#1A1A1A]">
+                            <p className="text-gray-600 uppercase mb-1">Deciders</p>
+                            <p className="text-gray-300 truncate">{decision.deciders || 'Architect'}</p>
+                          </div>
+                        </div>
+
+                        <div className="space-y-4">
+                          {(decision.supersedes || decision.amends) && (
+                            <div className="flex flex-wrap gap-2">
+                              {decision.supersedes && (
+                                <div className="px-2 py-1 rounded bg-red-500/10 border border-red-500/20 text-[10px] text-red-400 font-mono">
+                                  SUPERSEDES: {graph.decisions.find(d => d?.id === decision.supersedes)?.title || 'Unknown'}
+                                </div>
+                              )}
+                              {decision.amends && (
+                                <div className="px-2 py-1 rounded bg-blue-500/10 border border-blue-500/20 text-[10px] text-blue-400 font-mono">
+                                  AMENDS: {graph.decisions.find(d => d?.id === decision.amends)?.title || 'Unknown'}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          <div className="space-y-2">
+                            <p className="text-[10px] font-bold uppercase text-gray-600 tracking-widest">Context</p>
+                            <p className="text-[13px] text-gray-400 leading-relaxed">{decision.summary}</p>
+                          </div>
+                          <div className="space-y-2">
+                            <p className="text-[10px] font-bold uppercase text-gray-600 tracking-widest">Decision Outcome</p>
+                            <p className="text-[13px] text-gray-300 leading-relaxed">{decision.rationale}</p>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                          <div className="space-y-2">
+                            <p className="text-[10px] font-bold uppercase text-emerald-500/70 tracking-widest">Consequences (Pros)</p>
+                            <ul className="space-y-1">
+                              {(decision.pros || []).map((p, i) => (
+                                <li key={i} className="text-[12px] text-gray-400 flex items-start gap-2">
+                                  <Check className="w-3 h-3 text-emerald-500 mt-1 shrink-0" />
+                                  <span>{p}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                          <div className="space-y-2">
+                            <p className="text-[10px] font-bold uppercase text-red-500/70 tracking-widest">Consequences (Cons)</p>
+                            <ul className="space-y-1">
+                              {(decision.cons || []).map((c, i) => (
+                                <li key={i} className="text-[12px] text-gray-400 flex items-start gap-2">
+                                  <X className="w-3 h-3 text-red-500 mt-1 shrink-0" />
+                                  <span>{c}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        </div>
+
+                        <div className="pt-4 border-t border-[#1A1A1A] flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <span className={cn("text-[9px] font-mono uppercase px-2 py-0.5 rounded-full border", layer?.color.replace('text', 'border') || 'border-gray-800')}>
+                              {decision.layer}
+                            </span>
+                            <div className="flex items-center gap-2">
+                              <div className="w-16 h-1 bg-gray-900 rounded-full overflow-hidden">
+                                <div className={cn("h-full", decision.confidence > 80 ? "bg-emerald-500" : "bg-amber-500")} style={{ width: `${decision.confidence}%` }} />
+                              </div>
+                              <span className="text-[9px] font-mono text-gray-600">{decision.confidence}% Confidence</span>
+                            </div>
+                          </div>
+                          {decision.sourceMessageId && (
+                            <button onClick={() => scrollToMessage(decision.sourceMessageId!)} className="text-[10px] font-mono text-gray-600 hover:text-[#00E599] flex items-center gap-1 transition-colors">
+                              <Link2 className="w-3 h-3" />
+                              Source
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </motion.div>
+                  );
+                })
+              ) : (
+                <div className="flex-1 flex flex-col items-center justify-center text-center p-12 space-y-4 border border-dashed border-[#262626] rounded-3xl bg-[#111]/30">
+                  <div className="w-16 h-16 rounded-2xl bg-[#141414] border border-[#262626] flex items-center justify-center shadow-inner">
+                    <ListChecks className="w-8 h-8 text-gray-700" />
+                  </div>
+                  <div className="max-w-xs space-y-2">
+                    <h3 className="text-white font-medium text-lg">No Decisions Yet</h3>
+                    <p className="text-sm text-gray-500 leading-relaxed">
+                      Architecture Decision Records (ADRs) help document the "why" behind your design. Create one manually or let ArchBot extract them from your chat.
+                    </p>
+                  </div>
+                  <button 
+                    onClick={handleNewADR}
+                    className="px-4 py-2 rounded-lg bg-[#141414] border border-[#262626] text-xs font-medium text-[#00E599] hover:bg-[#1A1A1A] transition-colors"
+                  >
+                    Create First ADR
+                  </button>
+                </div>
+              )
             )}
           </div>
         </div>
@@ -1463,8 +2406,8 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
         "flex-col bg-[#0A0A0A] w-full h-full min-h-0",
         activeTab === 'matrix' ? "flex flex-1" : "hidden"
       )}>
-        <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0">
-          <div className="flex items-center gap-2">
+        <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
+          <div className="flex items-center gap-2 shrink-0">
             <Activity className="w-4 h-4 text-gray-400" />
             <h2 className="text-sm font-medium text-white">Trade-off Matrix</h2>
           </div>
@@ -1474,10 +2417,10 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
               if (topic) handleGenerateTradeOff(topic);
             }}
             disabled={isExtracting}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-[#00E599] text-black text-xs font-bold hover:bg-[#00CC88] transition-colors disabled:opacity-50"
+            className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-[#00E599] text-black text-xs font-bold hover:bg-[#00CC88] transition-colors disabled:opacity-50 shrink-0"
           >
             <Plus className="w-3.5 h-3.5" />
-            New Comparison
+            <span className="hidden sm:inline">New Comparison</span>
           </button>
         </div>
 
@@ -1515,7 +2458,7 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
                         <p className="text-sm text-gray-400 leading-relaxed">{matrix.optionA.description}</p>
                       </div>
 
-                      <div className="grid grid-cols-2 gap-4">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         <div className="p-3 rounded-xl bg-[#050505] border border-[#1A1A1A]">
                           <p className="text-[9px] text-gray-600 uppercase mb-1">Cost</p>
                           <p className={cn(
@@ -1568,7 +2511,7 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
                         <p className="text-sm text-gray-400 leading-relaxed">{matrix.optionB.description}</p>
                       </div>
 
-                      <div className="grid grid-cols-2 gap-4">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         <div className="p-3 rounded-xl bg-[#050505] border border-[#1A1A1A]">
                           <p className="text-[9px] text-gray-600 uppercase mb-1">Cost</p>
                           <p className={cn(
@@ -1643,6 +2586,73 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
 
     {/* Edit Node Modal */}
     <AnimatePresence>
+      {/* PROJECT SETTINGS MODAL */}
+      <AnimatePresence>
+        {showProjectSettings && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="w-full max-w-md bg-[#0A0A0A] border border-[#262626] rounded-2xl shadow-2xl overflow-hidden"
+            >
+              <div className="p-6 border-b border-[#1A1A1A] flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-lg bg-[#141414] border border-[#262626]">
+                    <Settings className="w-5 h-5 text-[#00E599]" />
+                  </div>
+                  <h2 className="text-xl font-bold text-white">Project Settings</h2>
+                </div>
+                <button 
+                  onClick={() => setShowProjectSettings(null)}
+                  className="p-2 rounded-lg hover:bg-[#141414] text-gray-500 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-6">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-bold uppercase text-gray-600 tracking-widest">Project Name</label>
+                  <input
+                    type="text"
+                    value={projects.find(p => p.id === showProjectSettings)?.name || ''}
+                    onChange={(e) => handleRenameProject(showProjectSettings, e.target.value)}
+                    className="w-full bg-[#050505] border border-[#1A1A1A] rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-[#00E599] transition-colors"
+                    placeholder="Enter project name..."
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[10px] font-bold uppercase text-gray-600 tracking-widest">Architectural Strategy</label>
+                  <select
+                    value={projects.find(p => p.id === showProjectSettings)?.strategy || 'mvp'}
+                    onChange={(e) => handleUpdateProjectStrategy(showProjectSettings, e.target.value as any)}
+                    className="w-full bg-[#050505] border border-[#1A1A1A] rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-[#00E599] transition-colors"
+                  >
+                    <option value="mvp">MVP (Speed & Core Value)</option>
+                    <option value="scale">Scale (Performance & Resilience)</option>
+                    <option value="hybrid">Hybrid (Balanced Growth)</option>
+                  </select>
+                  <p className="text-[10px] text-gray-500 italic">
+                    This strategy guides ArchBot's synthesis and conflict detection.
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-6 bg-[#050505] border-t border-[#1A1A1A] flex justify-end">
+                <button
+                  onClick={() => setShowProjectSettings(null)}
+                  className="px-6 py-2 rounded-xl bg-[#00E599] text-black font-bold text-sm hover:bg-[#00CC88] transition-all shadow-[0_0_20px_rgba(0,229,153,0.2)]"
+                >
+                  Close Settings
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {editingNode && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="bg-[#111] border border-[#262626] rounded-2xl p-6 w-full max-w-md shadow-2xl space-y-5">
@@ -1654,6 +2664,27 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
               <div className="space-y-1.5">
                 <label className="text-[10px] font-bold uppercase text-gray-600 tracking-widest">Text</label>
                 <textarea value={editingNode.text} onChange={e => setEditingNode({...editingNode, text: e.target.value})} className="w-full bg-[#141414] border border-[#262626] rounded-lg p-3 text-sm text-gray-200 focus:outline-none focus:border-[#00E599]/50 min-h-[100px]" />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold uppercase text-gray-600 tracking-widest">Category</label>
+                  <select value={editingNode.category} onChange={e => setEditingNode({...editingNode, category: e.target.value as KnowledgeCategory})} className="w-full bg-[#141414] border border-[#262626] rounded-lg p-2.5 text-sm text-gray-200 focus:outline-none focus:border-[#00E599]/50">
+                    <option value="constraint">Constraint</option>
+                    <option value="use-case">Use Case</option>
+                    <option value="ambition">Ambition</option>
+                    <option value="insight">Insight</option>
+                  </select>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold uppercase text-gray-600 tracking-widest">Layer</label>
+                  <select value={editingNode.layer} onChange={e => setEditingNode({...editingNode, layer: e.target.value as KnowledgeLayer})} className="w-full bg-[#141414] border border-[#262626] rounded-lg p-2.5 text-sm text-gray-200 focus:outline-none focus:border-[#00E599]/50">
+                    <option value="infrastructure">Infrastructure</option>
+                    <option value="data">Data</option>
+                    <option value="logic">Logic</option>
+                    <option value="interface">Interface</option>
+                    <option value="cross-cutting">Cross-cutting</option>
+                  </select>
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
@@ -1718,6 +2749,34 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
                 <label className="text-[10px] font-bold uppercase text-gray-600 tracking-widest">Title</label>
                 <input value={editingDecision.title} onChange={e => setEditingDecision({...editingDecision, title: e.target.value})} className="w-full bg-[#141414] border border-[#262626] rounded-lg p-3 text-sm text-gray-200 focus:outline-none focus:border-[#00E599]/50" />
               </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold uppercase text-gray-600 tracking-widest">Supersedes</label>
+                  <select 
+                    value={editingDecision.supersedes || ''} 
+                    onChange={e => setEditingDecision({...editingDecision, supersedes: e.target.value || undefined})}
+                    className="w-full bg-[#141414] border border-[#262626] rounded-lg p-3 text-sm text-gray-200 focus:outline-none focus:border-[#00E599]/50"
+                  >
+                    <option value="">None</option>
+                    {(graph.decisions || []).filter(d => d && d.id !== editingDecision.id).map(d => (
+                      <option key={d.id} value={d.id}>{d.title}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold uppercase text-gray-600 tracking-widest">Amends</label>
+                  <select 
+                    value={editingDecision.amends || ''} 
+                    onChange={e => setEditingDecision({...editingDecision, amends: e.target.value || undefined})}
+                    className="w-full bg-[#141414] border border-[#262626] rounded-lg p-3 text-sm text-gray-200 focus:outline-none focus:border-[#00E599]/50"
+                  >
+                    <option value="">None</option>
+                    {(graph.decisions || []).filter(d => d && d.id !== editingDecision.id).map(d => (
+                      <option key={d.id} value={d.id}>{d.title}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
               <div className="space-y-1.5">
                 <label className="text-[10px] font-bold uppercase text-gray-600 tracking-widest">Deciders</label>
                 <input value={editingDecision.deciders || ''} onChange={e => setEditingDecision({...editingDecision, deciders: e.target.value})} placeholder="e.g. Architect, Lead Dev" className="w-full bg-[#141414] border border-[#262626] rounded-lg p-3 text-sm text-gray-200 focus:outline-none focus:border-[#00E599]/50" />
@@ -1734,10 +2793,107 @@ ${(tradeOffs || []).map(t => `### ${t.topic}
                 <label className="text-[10px] font-bold uppercase text-gray-600 tracking-widest">Confidence ({editingDecision.confidence}%)</label>
                 <input type="range" min="0" max="100" value={editingDecision.confidence} onChange={e => setEditingDecision({...editingDecision, confidence: parseInt(e.target.value)})} className="w-full accent-[#00E599]" />
               </div>
+              <div className="space-y-1.5">
+                <label className="text-[10px] font-bold uppercase text-gray-600 tracking-widest">Related Knowledge Nodes</label>
+                <div className="max-h-32 overflow-y-auto bg-[#141414] border border-[#262626] rounded-lg p-2 space-y-1">
+                  {(graph.nodes || []).map(node => (
+                    <label key={node.id} className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer hover:bg-[#1A1A1A] p-1.5 rounded">
+                      <input 
+                        type="checkbox" 
+                        checked={(editingDecision.relatedNodeIds || []).includes(node.id)}
+                        onChange={(e) => {
+                          const newIds = e.target.checked 
+                            ? [...(editingDecision.relatedNodeIds || []), node.id]
+                            : (editingDecision.relatedNodeIds || []).filter(id => id !== node.id);
+                          setEditingDecision({...editingDecision, relatedNodeIds: newIds});
+                        }}
+                        className="accent-[#00E599]"
+                      />
+                      <span className="truncate">{node.text}</span>
+                    </label>
+                  ))}
+                  {(graph.nodes || []).length === 0 && (
+                    <p className="text-xs text-gray-500 p-1">No knowledge nodes available.</p>
+                  )}
+                </div>
+              </div>
             </div>
             <div className="flex justify-end gap-2 pt-2 border-t border-[#1A1A1A]">
               <button onClick={() => setEditingDecision(null)} className="px-4 py-2 rounded-lg text-sm font-medium text-gray-400 hover:text-white transition-colors">Cancel</button>
               <button onClick={handleSaveDecision} className="px-4 py-2 rounded-lg text-sm font-medium bg-[#00E599] text-black hover:bg-[#00c282] transition-colors">Save Changes</button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+    </AnimatePresence>
+    
+    {/* NEW PROJECT MODAL */}
+    <AnimatePresence>
+      {isNewProjectModalOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95, y: 20 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: 20 }}
+            className="w-full max-w-md bg-[#0F0F0F] border border-[#262626] rounded-2xl shadow-2xl overflow-hidden"
+          >
+            <div className="p-6 border-b border-[#262626] flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-white">Initialize New Project</h3>
+              <button onClick={() => setIsNewProjectModalOpen(false)} className="text-gray-500 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-6 space-y-6">
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-gray-500 uppercase tracking-widest">Project Name</label>
+                <input 
+                  type="text" 
+                  value={newProjectName}
+                  onChange={(e) => setNewProjectName(e.target.value)}
+                  placeholder="e.g. Distributed Ledger v2"
+                  className="w-full bg-[#141414] border border-[#262626] rounded-xl px-4 py-3 text-white focus:outline-none focus:border-[#00E599] transition-colors"
+                  autoFocus
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-gray-500 uppercase tracking-widest">Architecture Strategy</label>
+                <div className="grid grid-cols-3 gap-3">
+                  {(['mvp', 'scale', 'hybrid'] as const).map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => setNewProjectStrategy(s)}
+                      className={cn(
+                        "px-3 py-4 rounded-xl border text-xs font-bold uppercase tracking-widest transition-all text-center",
+                        newProjectStrategy === s 
+                          ? "bg-[#00E599]/10 border-[#00E599] text-[#00E599]" 
+                          : "bg-[#141414] border-[#262626] text-gray-500 hover:border-gray-700"
+                      )}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-gray-600 mt-2">
+                  {newProjectStrategy === 'mvp' && "Optimized for speed, simplicity, and rapid iteration."}
+                  {newProjectStrategy === 'scale' && "Optimized for high availability, performance, and robustness."}
+                  {newProjectStrategy === 'hybrid' && "Balanced approach for growing systems."}
+                </p>
+              </div>
+            </div>
+            <div className="p-6 bg-[#141414] flex gap-3">
+              <button 
+                onClick={() => setIsNewProjectModalOpen(false)}
+                className="flex-1 py-3 rounded-xl border border-[#262626] text-gray-400 font-bold uppercase tracking-widest text-xs hover:bg-[#1A1A1A] transition-colors"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={handleCreateProject}
+                disabled={!newProjectName.trim()}
+                className="flex-1 py-3 rounded-xl bg-[#00E599] text-black font-bold uppercase tracking-widest text-xs hover:bg-[#00c282] disabled:opacity-50 transition-colors"
+              >
+                Create Project
+              </button>
             </div>
           </motion.div>
         </div>
