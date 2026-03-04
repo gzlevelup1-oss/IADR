@@ -7,7 +7,16 @@ import { useState, useEffect, useRef } from 'react';
 import { GoogleGenAI, Type } from '@google/genai';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Send, Bot, User, FileText, Server, AlertTriangle, ListChecks, Download, Upload, Loader2, Sparkles, MessageSquare, Layers, Target, Zap, Shield, Database, Layout, Link2, ChevronRight, Activity, Share2, Edit2, Trash2, X, Copy, Check, Plus, RefreshCw, Settings, FileJson, Split } from 'lucide-react';
+import { Send, Bot, User, FileText, Server, AlertTriangle, ListChecks, Download, Upload, Loader2, Sparkles, MessageSquare, Layers, Target, Zap, Shield, Database, Layout, Link2, ChevronRight, Activity, Share2, Edit2, Trash2, X, Copy, Check, Plus, RefreshCw, Settings, FileJson, Split, Paperclip, DollarSign, BookOpen, Code, ShieldCheck, Cpu, FileCheck, BarChart3, Gauge } from 'lucide-react';
+
+const DESIGN_PATTERNS = [
+  { id: 'microservices', title: 'Microservices', description: 'Decompose system into small, independent services communicating over network.', pros: ['Scalability', 'Independent deployment'], cons: ['Complexity', 'Network latency'] },
+  { id: 'event-driven', title: 'Event-Driven', description: 'Asynchronous communication through events and message brokers.', pros: ['Loose coupling', 'Scalability'], cons: ['Eventual consistency', 'Debugging complexity'] },
+  { id: 'layered', title: 'Layered Architecture', description: 'Organize system into horizontal layers with strict dependencies.', pros: ['Separation of concerns', 'Maintainability'], cons: ['Performance overhead', 'Rigidity'] },
+  { id: 'serverless', title: 'Serverless', description: 'Event-driven compute without managing servers.', pros: ['Zero maintenance', 'Auto-scaling'], cons: ['Cold starts', 'Vendor lock-in'] },
+  { id: 'hexagonal', title: 'Hexagonal (Ports & Adapters)', description: 'Decouple core logic from external systems using interfaces.', pros: ['Testability', 'Flexibility'], cons: ['Boilerplate', 'Indirection'] },
+];
+
 import { motion, AnimatePresence } from 'motion/react';
 import { KnowledgeGraphView } from './components/KnowledgeGraph';
 import { Mermaid } from './components/Mermaid';
@@ -192,11 +201,25 @@ export default function App() {
 
   const [selectedModel, setSelectedModel] = useState(MODELS[0].id);
   const [modelStatus, setModelStatus] = useState<Record<string, 'ok' | 'quota_exceeded'>>({});
-  const [activeTab, setActiveTab] = useState<'chat' | 'map' | 'decisions' | 'matrix' | 'diagram'>('chat');
+  const [activeTab, setActiveTab] = useState<'chat' | 'map' | 'decisions' | 'matrix' | 'diagram' | 'cost' | 'patterns' | 'iac' | 'security' | 'skeletons' | 'compliance' | 'scorecard' | 'performance'>('chat');
   const [diagramType, setDiagramType] = useState<'layers' | 'lineage' | 'sequence'>('layers');
   const [modelComparisonMode, setModelComparisonMode] = useState(false);
   const [suggestions, setSuggestions] = useState<{ id: string, title: string, description: string, impact: 'high' | 'medium' | 'low' }[]>([]);
   const [isGeneratingSuggestions, setIsGeneratingSuggestions] = useState(false);
+  const [costEstimates, setCostEstimates] = useState<{ provider: string, monthlyTotal: number, breakdown: { service: string, cost: number, rationale: string }[] } | null>(null);
+  const [isEstimatingCosts, setIsEstimatingCosts] = useState(false);
+  const [iacTemplate, setIacTemplate] = useState<{ language: string, code: string, explanation: string } | null>(null);
+  const [isGeneratingIaC, setIsGeneratingIaC] = useState(false);
+  const [securityAudit, setSecurityAudit] = useState<{ vulnerabilities: { title: string, severity: 'critical' | 'high' | 'medium' | 'low', description: string, mitigation: string }[], score: number } | null>(null);
+  const [isAuditingSecurity, setIsAuditingSecurity] = useState(false);
+  const [serviceSkeletons, setServiceSkeletons] = useState<{ serviceName: string, language: string, files: { path: string, content: string }[] }[]>([]);
+  const [isGeneratingSkeletons, setIsGeneratingSkeletons] = useState(false);
+  const [complianceReport, setComplianceReport] = useState<{ standard: string, score: number, findings: { requirement: string, status: 'compliant' | 'non-compliant' | 'partial', gap: string, recommendation: string }[] } | null>(null);
+  const [isCheckingCompliance, setIsCheckingCompliance] = useState(false);
+  const [healthScorecard, setHealthScorecard] = useState<{ overall: number, security: number, cost: number, compliance: number, performance: number, summary: string } | null>(null);
+  const [isGeneratingScorecard, setIsGeneratingScorecard] = useState(false);
+  const [performanceEstimate, setPerformanceEstimate] = useState<{ tps: number, latency: string, bottlenecks: string[], scalability: string } | null>(null);
+  const [isEstimatingPerformance, setIsEstimatingPerformance] = useState(false);
   
   const [messages, setMessages] = useState<Message[]>([]);
   const [graph, setGraph] = useState<KnowledgeGraph>({ nodes: [], decisions: [], conflicts: [] });
@@ -239,30 +262,41 @@ export default function App() {
     }
   }, [currentProjectId]);
 
-  // Save current project when data changes
+  // Save current project when data changes (Debounced)
   useEffect(() => {
     if (!currentProjectId) return;
     
-    setProjects(prev => prev.map(p => {
-      if (p.id === currentProjectId) {
-        return {
-          ...p,
-          messages,
-          graph,
-          tradeOffs,
-          executiveSummary,
-          syncIndex: lastSyncIndexRef.current,
-          updatedAt: Date.now()
-        };
-      }
-      return p;
-    }));
-  }, [messages, graph, tradeOffs]);
+    const timeoutId = setTimeout(() => {
+      setProjects(prev => {
+        const updated = prev.map(p => {
+          if (p.id === currentProjectId) {
+            return {
+              ...p,
+              messages,
+              graph,
+              tradeOffs,
+              executiveSummary,
+              syncIndex: lastSyncIndexRef.current,
+              updatedAt: Date.now()
+            };
+          }
+          return p;
+        });
+        
+        // Persist to localStorage only if changed
+        const currentProject = updated.find(p => p.id === currentProjectId);
+        const prevProject = prev.find(p => p.id === currentProjectId);
+        
+        if (JSON.stringify(currentProject) !== JSON.stringify(prevProject)) {
+          localStorage.setItem('archbot_projects', JSON.stringify(updated));
+        }
+        
+        return updated;
+      });
+    }, 1000); // 1s debounce
 
-  // Persist projects to localStorage
-  useEffect(() => {
-    localStorage.setItem('archbot_projects', JSON.stringify(projects));
-  }, [projects]);
+    return () => clearTimeout(timeoutId);
+  }, [messages, graph, tradeOffs, executiveSummary, currentProjectId]);
 
   useEffect(() => {
     if (currentProjectId) {
@@ -746,6 +780,391 @@ export default function App() {
     } finally {
       setIsGeneratingSuggestions(false);
     }
+  };
+
+  const handleEstimateCosts = async (provider: 'aws' | 'gcp' | 'azure') => {
+    const infraNodes = graph.nodes.filter(n => n && n.layer === 'infrastructure');
+    if (infraNodes.length === 0) {
+      alert("No infrastructure components found to estimate costs for.");
+      return;
+    }
+
+    setIsEstimatingCosts(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const response = await ai.models.generateContent({
+        model: selectedModel,
+        contents: `Based on the following infrastructure components, provide a monthly cost estimate for ${provider.toUpperCase()}.
+        
+        Components:
+        ${JSON.stringify(infraNodes.map(n => n.text))}
+        
+        Return a JSON object with: provider, monthlyTotal (number), and breakdown (array of {service, cost, rationale}).`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              provider: { type: Type.STRING },
+              monthlyTotal: { type: Type.NUMBER },
+              breakdown: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    service: { type: Type.STRING },
+                    cost: { type: Type.NUMBER },
+                    rationale: { type: Type.STRING }
+                  },
+                  required: ['service', 'cost', 'rationale']
+                }
+              }
+            },
+            required: ['provider', 'monthlyTotal', 'breakdown']
+          }
+        }
+      });
+
+      const data = JSON.parse(response.text || '{}');
+      setCostEstimates(data);
+    } catch (error) {
+      console.error('Failed to estimate costs:', error);
+    } finally {
+      setIsEstimatingCosts(false);
+    }
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    if (file.type === 'application/pdf') {
+      // For PDF, we'll notify the user we're processing
+      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'model', text: `📁 Processing PDF: ${file.name}...` }]);
+      
+      // PDF extraction is complex in browser without worker, 
+      // for now we'll just read it as text if it's small or use a placeholder
+      // In a real app, we'd use pdfjs-dist properly.
+      // Let's try a simple text read for now or just handle .md
+      reader.onload = async (event) => {
+        const text = event.target?.result as string;
+        handleSend(`I've uploaded a file named ${file.name}. Here is its content for context:\n\n${text.substring(0, 5000)}`);
+      };
+      reader.readAsText(file);
+    } else if (file.name.endsWith('.md') || file.type === 'text/markdown' || file.type === 'text/plain') {
+      reader.onload = async (event) => {
+        const text = event.target?.result as string;
+        handleSend(`I've uploaded a markdown/text file named ${file.name}. Here is its content for context:\n\n${text}`);
+      };
+      reader.readAsText(file);
+    } else {
+      alert("Unsupported file type. Please upload .pdf, .md, or .txt files.");
+    }
+  };
+
+  const handleGenerateIaC = async (language: 'terraform' | 'cloudformation' | 'cdk') => {
+    const infraNodes = graph.nodes.filter(n => n && n.layer === 'infrastructure');
+    if (infraNodes.length === 0) {
+      alert("No infrastructure components found to generate IaC for.");
+      return;
+    }
+
+    setIsGeneratingIaC(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const response = await ai.models.generateContent({
+        model: selectedModel,
+        contents: `Generate an ${language.toUpperCase()} template for the following infrastructure components.
+        
+        Components:
+        ${JSON.stringify(infraNodes.map(n => n.text))}
+        
+        Return a JSON object with: language, code (the actual IaC template), and explanation (brief summary of what was generated).`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              language: { type: Type.STRING },
+              code: { type: Type.STRING },
+              explanation: { type: Type.STRING }
+            },
+            required: ['language', 'code', 'explanation']
+          }
+        }
+      });
+
+      const data = JSON.parse(response.text || '{}');
+      setIacTemplate(data);
+    } catch (error) {
+      console.error('Failed to generate IaC:', error);
+    } finally {
+      setIsGeneratingIaC(false);
+    }
+  };
+
+  const handleRunSecurityAudit = async () => {
+    if (graph.nodes.length === 0) {
+      alert("No system components found to audit.");
+      return;
+    }
+
+    setIsAuditingSecurity(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const response = await ai.models.generateContent({
+        model: selectedModel,
+        contents: `Perform a security threat model and audit for the following system architecture.
+        
+        System Components:
+        ${JSON.stringify(graph.nodes.map(n => ({ text: n.text, layer: n.layer, category: n.category })))}
+        
+        Return a JSON object with: 
+        - score (number 0-100, where 100 is perfectly secure)
+        - vulnerabilities (array of {title, severity: 'critical'|'high'|'medium'|'low', description, mitigation})`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              score: { type: Type.NUMBER },
+              vulnerabilities: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    title: { type: Type.STRING },
+                    severity: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                    mitigation: { type: Type.STRING }
+                  },
+                  required: ['title', 'severity', 'description', 'mitigation']
+                }
+              }
+            },
+            required: ['score', 'vulnerabilities']
+          }
+        }
+      });
+
+      const data = JSON.parse(response.text || '{}');
+      setSecurityAudit(data);
+    } catch (error) {
+      console.error('Failed to run security audit:', error);
+    } finally {
+      setIsAuditingSecurity(false);
+    }
+  };
+
+  const handleGenerateSkeletons = async (language: string) => {
+    const logicNodes = graph.nodes.filter(n => n && n.layer === 'logic');
+    if (logicNodes.length === 0) {
+      alert("No logic/service components found to generate skeletons for.");
+      return;
+    }
+
+    setIsGeneratingSkeletons(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const response = await ai.models.generateContent({
+        model: selectedModel,
+        contents: `Generate service skeletons in ${language} for the following services:
+        ${JSON.stringify(logicNodes.map(n => n.text))}
+        
+        Return a JSON array of objects, each containing:
+        - serviceName
+        - language
+        - files (array of {path, content})`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                serviceName: { type: Type.STRING },
+                language: { type: Type.STRING },
+                files: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      path: { type: Type.STRING },
+                      content: { type: Type.STRING }
+                    },
+                    required: ['path', 'content']
+                  }
+                }
+              },
+              required: ['serviceName', 'language', 'files']
+            }
+          }
+        }
+      });
+
+      const data = JSON.parse(response.text || '[]');
+      setServiceSkeletons(data);
+    } catch (error) {
+      console.error('Failed to generate skeletons:', error);
+    } finally {
+      setIsGeneratingSkeletons(false);
+    }
+  };
+
+  const handleRunComplianceCheck = async (standard: string) => {
+    if (graph.nodes.length === 0) {
+      alert("No system components found to check compliance for.");
+      return;
+    }
+
+    setIsCheckingCompliance(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const response = await ai.models.generateContent({
+        model: selectedModel,
+        contents: `Evaluate the following architecture against the ${standard} compliance standard.
+        
+        Architecture:
+        ${JSON.stringify(graph.nodes.map(n => ({ text: n.text, layer: n.layer, category: n.category })))}
+        
+        Return a JSON object with:
+        - standard (string)
+        - score (number 0-100)
+        - findings (array of {requirement, status: 'compliant'|'non-compliant'|'partial', gap, recommendation})`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              standard: { type: Type.STRING },
+              score: { type: Type.NUMBER },
+              findings: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    requirement: { type: Type.STRING },
+                    status: { type: Type.STRING },
+                    gap: { type: Type.STRING },
+                    recommendation: { type: Type.STRING }
+                  },
+                  required: ['requirement', 'status', 'gap', 'recommendation']
+                }
+              }
+            },
+            required: ['standard', 'score', 'findings']
+          }
+        }
+      });
+
+      const data = JSON.parse(response.text || '{}');
+      setComplianceReport(data);
+    } catch (error) {
+      console.error('Failed to run compliance check:', error);
+    } finally {
+      setIsCheckingCompliance(false);
+    }
+  };
+
+  const handleGenerateScorecard = async () => {
+    if (graph.nodes.length === 0) {
+      alert("No system components found to generate a scorecard.");
+      return;
+    }
+
+    setIsGeneratingScorecard(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const response = await ai.models.generateContent({
+        model: selectedModel,
+        contents: `Generate a comprehensive Architecture Health Scorecard for the following system.
+        
+        Architecture:
+        ${JSON.stringify(graph.nodes.map(n => ({ text: n.text, layer: n.layer, category: n.category })))}
+        
+        Consider Security, Cost, Compliance, and Performance.
+        Return a JSON object with:
+        - overall (number 0-100)
+        - security (number 0-100)
+        - cost (number 0-100)
+        - compliance (number 0-100)
+        - performance (number 0-100)
+        - summary (string, brief executive summary)`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              overall: { type: Type.NUMBER },
+              security: { type: Type.NUMBER },
+              cost: { type: Type.NUMBER },
+              compliance: { type: Type.NUMBER },
+              performance: { type: Type.NUMBER },
+              summary: { type: Type.STRING }
+            },
+            required: ['overall', 'security', 'cost', 'compliance', 'performance', 'summary']
+          }
+        }
+      });
+
+      const data = JSON.parse(response.text || '{}');
+      setHealthScorecard(data);
+    } catch (error) {
+      console.error('Failed to generate scorecard:', error);
+    } finally {
+      setIsGeneratingScorecard(false);
+    }
+  };
+
+  const handleEstimatePerformance = async () => {
+    if (graph.nodes.length === 0) {
+      alert("No system components found to estimate performance.");
+      return;
+    }
+
+    setIsEstimatingPerformance(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const response = await ai.models.generateContent({
+        model: selectedModel,
+        contents: `Estimate the performance and scalability of the following architecture.
+        
+        Architecture:
+        ${JSON.stringify(graph.nodes.map(n => ({ text: n.text, layer: n.layer, category: n.category })))}
+        
+        Return a JSON object with:
+        - tps (number, estimated transactions per second)
+        - latency (string, e.g., "50ms - 200ms")
+        - bottlenecks (array of strings)
+        - scalability (string, brief analysis of how it scales)`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              tps: { type: Type.NUMBER },
+              latency: { type: Type.STRING },
+              bottlenecks: { type: Type.ARRAY, items: { type: Type.STRING } },
+              scalability: { type: Type.STRING }
+            },
+            required: ['tps', 'latency', 'bottlenecks', 'scalability']
+          }
+        }
+      });
+
+      const data = JSON.parse(response.text || '{}');
+      setPerformanceEstimate(data);
+    } catch (error) {
+      console.error('Failed to estimate performance:', error);
+    } finally {
+      setIsEstimatingPerformance(false);
+    }
+  };
+
+  const handleApplyPattern = (pattern: typeof DESIGN_PATTERNS[0]) => {
+    handleSend(`I want to apply the ${pattern.title} design pattern to my architecture. ${pattern.description} Please update the system design accordingly.`);
+    setActiveTab('chat');
   };
 
   const handleCreateProject = () => {
@@ -1371,6 +1790,102 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
           {activeTab === 'diagram' && <motion.div layoutId="activeTab" className="absolute left-0 w-1 h-6 bg-[#00E599] rounded-r-full" />}
         </button>
 
+        <button 
+          onClick={() => setActiveTab('cost')}
+          className={cn(
+            "p-3 rounded-xl transition-all duration-200 group relative",
+            activeTab === 'cost' ? "bg-[#141414] text-[#00E599] shadow-lg shadow-emerald-500/10" : "text-gray-500 hover:text-gray-300 hover:bg-[#111]"
+          )}
+          title="Cloud Cost Estimator"
+        >
+          <DollarSign className="w-5 h-5" />
+          {activeTab === 'cost' && <motion.div layoutId="activeTab" className="absolute left-0 w-1 h-6 bg-[#00E599] rounded-r-full" />}
+        </button>
+
+        <button 
+          onClick={() => setActiveTab('patterns')}
+          className={cn(
+            "p-3 rounded-xl transition-all duration-200 group relative",
+            activeTab === 'patterns' ? "bg-[#141414] text-[#00E599] shadow-lg shadow-emerald-500/10" : "text-gray-500 hover:text-gray-300 hover:bg-[#111]"
+          )}
+          title="Design Pattern Library"
+        >
+          <BookOpen className="w-5 h-5" />
+          {activeTab === 'patterns' && <motion.div layoutId="activeTab" className="absolute left-0 w-1 h-6 bg-[#00E599] rounded-r-full" />}
+        </button>
+
+        <button 
+          onClick={() => setActiveTab('iac')}
+          className={cn(
+            "p-3 rounded-xl transition-all duration-200 group relative",
+            activeTab === 'iac' ? "bg-[#141414] text-[#00E599] shadow-lg shadow-emerald-500/10" : "text-gray-500 hover:text-gray-300 hover:bg-[#111]"
+          )}
+          title="Infrastructure as Code"
+        >
+          <Code className="w-5 h-5" />
+          {activeTab === 'iac' && <motion.div layoutId="activeTab" className="absolute left-0 w-1 h-6 bg-[#00E599] rounded-r-full" />}
+        </button>
+
+        <button 
+          onClick={() => setActiveTab('security')}
+          className={cn(
+            "p-3 rounded-xl transition-all duration-200 group relative",
+            activeTab === 'security' ? "bg-[#141414] text-[#00E599] shadow-lg shadow-emerald-500/10" : "text-gray-500 hover:text-gray-300 hover:bg-[#111]"
+          )}
+          title="Security Audit"
+        >
+          <ShieldCheck className="w-5 h-5" />
+          {activeTab === 'security' && <motion.div layoutId="activeTab" className="absolute left-0 w-1 h-6 bg-[#00E599] rounded-r-full" />}
+        </button>
+
+        <button 
+          onClick={() => setActiveTab('skeletons')}
+          className={cn(
+            "p-3 rounded-xl transition-all duration-200 group relative",
+            activeTab === 'skeletons' ? "bg-[#141414] text-[#00E599] shadow-lg shadow-emerald-500/10" : "text-gray-500 hover:text-gray-300 hover:bg-[#111]"
+          )}
+          title="Service Skeletons"
+        >
+          <Cpu className="w-5 h-5" />
+          {activeTab === 'skeletons' && <motion.div layoutId="activeTab" className="absolute left-0 w-1 h-6 bg-[#00E599] rounded-r-full" />}
+        </button>
+
+        <button 
+          onClick={() => setActiveTab('compliance')}
+          className={cn(
+            "p-3 rounded-xl transition-all duration-200 group relative",
+            activeTab === 'compliance' ? "bg-[#141414] text-[#00E599] shadow-lg shadow-emerald-500/10" : "text-gray-500 hover:text-gray-300 hover:bg-[#111]"
+          )}
+          title="Compliance Mapping"
+        >
+          <FileCheck className="w-5 h-5" />
+          {activeTab === 'compliance' && <motion.div layoutId="activeTab" className="absolute left-0 w-1 h-6 bg-[#00E599] rounded-r-full" />}
+        </button>
+
+        <button 
+          onClick={() => setActiveTab('scorecard')}
+          className={cn(
+            "p-3 rounded-xl transition-all duration-200 group relative",
+            activeTab === 'scorecard' ? "bg-[#141414] text-[#00E599] shadow-lg shadow-emerald-500/10" : "text-gray-500 hover:text-gray-300 hover:bg-[#111]"
+          )}
+          title="Architecture Scorecard"
+        >
+          <BarChart3 className="w-5 h-5" />
+          {activeTab === 'scorecard' && <motion.div layoutId="activeTab" className="absolute left-0 w-1 h-6 bg-[#00E599] rounded-r-full" />}
+        </button>
+
+        <button 
+          onClick={() => setActiveTab('performance')}
+          className={cn(
+            "p-3 rounded-xl transition-all duration-200 group relative",
+            activeTab === 'performance' ? "bg-[#141414] text-[#00E599] shadow-lg shadow-emerald-500/10" : "text-gray-500 hover:text-gray-300 hover:bg-[#111]"
+          )}
+          title="Performance Estimator"
+        >
+          <Gauge className="w-5 h-5" />
+          {activeTab === 'performance' && <motion.div layoutId="activeTab" className="absolute left-0 w-1 h-6 bg-[#00E599] rounded-r-full" />}
+        </button>
+
         <div className="mt-auto flex flex-col gap-4">
           <button 
             onClick={handleImportProject}
@@ -1471,14 +1986,24 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
         <button onClick={() => setActiveTab('decisions')} className={cn("flex-1 py-2 text-xs font-medium rounded-md transition-colors text-center", activeTab === 'decisions' ? "bg-[#262626] text-white" : "text-gray-500")}>ADR</button>
         <button onClick={() => setActiveTab('matrix')} className={cn("flex-1 py-2 text-xs font-medium rounded-md transition-colors text-center", activeTab === 'matrix' ? "bg-[#262626] text-white" : "text-gray-500")}>Matrix</button>
         <button onClick={() => setActiveTab('diagram')} className={cn("flex-1 py-2 text-xs font-medium rounded-md transition-colors text-center", activeTab === 'diagram' ? "bg-[#262626] text-white" : "text-gray-500")}>Diagram</button>
+        <button onClick={() => setActiveTab('cost')} className={cn("flex-1 py-2 text-xs font-medium rounded-md transition-colors text-center", activeTab === 'cost' ? "bg-[#262626] text-white" : "text-gray-500")}>Cost</button>
+        <button onClick={() => setActiveTab('patterns')} className={cn("flex-1 py-2 text-xs font-medium rounded-md transition-colors text-center", activeTab === 'patterns' ? "bg-[#262626] text-white" : "text-gray-500")}>Patterns</button>
+        <button onClick={() => setActiveTab('iac')} className={cn("flex-1 py-2 text-xs font-medium rounded-md transition-colors text-center", activeTab === 'iac' ? "bg-[#262626] text-white" : "text-gray-500")}>IaC</button>
+        <button onClick={() => setActiveTab('security')} className={cn("flex-1 py-2 text-xs font-medium rounded-md transition-colors text-center", activeTab === 'security' ? "bg-[#262626] text-white" : "text-gray-500")}>Security</button>
+        <button onClick={() => setActiveTab('skeletons')} className={cn("flex-1 py-2 text-xs font-medium rounded-md transition-colors text-center", activeTab === 'skeletons' ? "bg-[#262626] text-white" : "text-gray-500")}>Skeletons</button>
+        <button onClick={() => setActiveTab('compliance')} className={cn("flex-1 py-2 text-xs font-medium rounded-md transition-colors text-center", activeTab === 'compliance' ? "bg-[#262626] text-white" : "text-gray-500")}>Compliance</button>
+        <button onClick={() => setActiveTab('scorecard')} className={cn("flex-1 py-2 text-xs font-medium rounded-md transition-colors text-center", activeTab === 'scorecard' ? "bg-[#262626] text-white" : "text-gray-500")}>Scorecard</button>
+        <button onClick={() => setActiveTab('performance')} className={cn("flex-1 py-2 text-xs font-medium rounded-md transition-colors text-center", activeTab === 'performance' ? "bg-[#262626] text-white" : "text-gray-500")}>Perf</button>
       </div>
 
       {/* LEFT PANE: Chat Sandbox */}
-      <div className={cn(
-        "w-full flex-col border-r border-[#262626] bg-[#0A0A0A] relative z-10 shadow-2xl h-full min-h-0",
-        activeTab === 'chat' ? "flex flex-1" : "hidden"
-      )}>
-        {/* Header */}
+      {activeTab === 'chat' && (
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="flex flex-col border-r border-[#262626] bg-[#0A0A0A] relative z-10 shadow-2xl min-h-0 flex-1"
+        >
+          {/* Header */}
         <div className="h-16 flex items-center px-6 glass-header shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-lg bg-[#141414] border border-[#262626] flex items-center justify-center shrink-0">
@@ -1677,12 +2202,18 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
         {/* Input Area */}
         <div className="p-2 sm:p-4 border-t border-[#262626] bg-[#0A0A0A] shrink-0">
           <div className="relative flex items-end bg-[#141414] border border-[#262626] rounded-xl focus-within:border-[#00E599]/50 focus-within:ring-1 focus-within:ring-[#00E599]/50 transition-all">
+            <div className="absolute left-2 bottom-2 flex items-center">
+              <label className="p-2 rounded-lg text-gray-500 hover:text-white hover:bg-gray-800 cursor-pointer transition-colors">
+                <Paperclip className="w-4 h-4" />
+                <input type="file" className="hidden" onChange={handleFileUpload} accept=".pdf,.md,.txt" />
+              </label>
+            </div>
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Describe your system idea, constraints, or ask a question..."
-              className="w-full max-h-48 min-h-[56px] bg-transparent text-sm text-gray-200 placeholder-gray-600 p-3 sm:p-4 pr-12 resize-none focus:outline-none"
+              className="w-full max-h-48 min-h-[56px] bg-transparent text-sm text-gray-200 placeholder-gray-600 p-3 sm:p-4 pl-12 pr-12 resize-none focus:outline-none"
               rows={1}
             />
             <button
@@ -1718,14 +2249,17 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
             )}
           </div>
         </div>
-      </div>
+      </motion.div>
+      )}
 
       {/* CENTER PANE: Knowledge Map */}
-      <div className={cn(
-        "flex-col w-full border-r border-[#262626] bg-[#0A0A0A] h-full min-h-0",
-        activeTab === 'map' ? "flex flex-1" : "hidden"
-      )}>
-        <div className="h-16 flex items-center justify-between px-4 sm:px-6 glass-header shrink-0">
+      {activeTab === 'map' && (
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="flex flex-col border-r border-[#262626] bg-[#0A0A0A] min-h-0 flex-1"
+        >
+          <div className="h-16 flex items-center justify-between px-4 sm:px-6 glass-header shrink-0">
           <div className="flex items-center gap-2 sm:gap-4">
             <div className="hidden sm:flex items-center gap-2">
               <Layers className="w-4 h-4 text-gray-400" />
@@ -2052,13 +2586,16 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
             </motion.div>
           )}
         </AnimatePresence>
-      </div>
+      </motion.div>
+      )}
 
       {/* DIAGRAM VIEW */}
-      <div className={cn(
-        "flex-col w-full border-r border-[#262626] bg-[#0A0A0A] h-full min-h-0",
-        activeTab === 'diagram' ? "flex flex-1" : "hidden"
-      )}>
+      {activeTab === 'diagram' && (
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="flex flex-col border-r border-[#262626] bg-[#0A0A0A] min-h-0 flex-1"
+        >
         <div className="h-16 flex items-center justify-between px-4 sm:px-6 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
           <div className="flex items-center gap-2 sm:gap-4 shrink-0">
             <Layout className="w-4 h-4 text-gray-400" />
@@ -2117,14 +2654,17 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
             )}
           </div>
         </div>
-      </div>
+      </motion.div>
+      )}
 
       {/* RIGHT PANE: Decision Ledger (ADR) */}
-      <div className={cn(
-        "flex-col bg-[#0A0A0A] w-full h-full min-h-0",
-        activeTab === 'decisions' ? "flex flex-1" : "hidden"
-      )}>
-        <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
+      {activeTab === 'decisions' && (
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+        >
+          <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
           <div className="flex items-center gap-4 shrink-0">
             <div className="hidden sm:flex items-center gap-2">
               <ListChecks className="w-4 h-4 text-gray-400" />
@@ -2399,13 +2939,16 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
             )}
           </div>
         </div>
-      </div>
+      </motion.div>
+      )}
 
       {/* RIGHT PANE: Trade-off Matrix */}
-      <div className={cn(
-        "flex-col bg-[#0A0A0A] w-full h-full min-h-0",
-        activeTab === 'matrix' ? "flex flex-1" : "hidden"
-      )}>
+      {activeTab === 'matrix' && (
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+        >
         <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
           <div className="flex items-center gap-2 shrink-0">
             <Activity className="w-4 h-4 text-gray-400" />
@@ -2581,7 +3124,776 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
             )}
           </div>
         </div>
-      </div>
+      </motion.div>
+      )}
+
+      {/* RIGHT PANE: Cloud Cost Estimator */}
+      {activeTab === 'cost' && (
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+        >
+          <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
+          <div className="flex items-center gap-2 shrink-0">
+            <DollarSign className="w-4 h-4 text-gray-400" />
+            <h2 className="text-sm font-medium text-white">Cloud Cost Estimator</h2>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => handleEstimateCosts('aws')}
+              disabled={isEstimatingCosts}
+              className="px-3 py-1.5 rounded-md bg-[#FF9900] text-black text-[10px] font-bold uppercase hover:opacity-90 transition-opacity disabled:opacity-50"
+            >
+              AWS
+            </button>
+            <button
+              onClick={() => handleEstimateCosts('gcp')}
+              disabled={isEstimatingCosts}
+              className="px-3 py-1.5 rounded-md bg-[#4285F4] text-white text-[10px] font-bold uppercase hover:opacity-90 transition-opacity disabled:opacity-50"
+            >
+              GCP
+            </button>
+            <button
+              onClick={() => handleEstimateCosts('azure')}
+              disabled={isEstimatingCosts}
+              className="px-3 py-1.5 rounded-md bg-[#0089D6] text-white text-[10px] font-bold uppercase hover:opacity-90 transition-opacity disabled:opacity-50"
+            >
+              Azure
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-8">
+          <div className="max-w-3xl mx-auto space-y-8">
+            {isEstimatingCosts ? (
+              <div className="flex flex-col items-center justify-center py-20 space-y-4">
+                <Loader2 className="w-12 h-12 text-[#00E599] animate-spin" />
+                <p className="text-sm text-gray-500 font-mono animate-pulse">CALCULATING INFRASTRUCTURE COSTS...</p>
+              </div>
+            ) : costEstimates ? (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="space-y-8"
+              >
+                <div className="p-8 rounded-3xl bg-gradient-to-br from-[#111] to-[#050505] border border-[#1A1A1A] relative overflow-hidden">
+                  <div className="absolute top-0 right-0 p-4">
+                    <span className="text-[10px] font-mono text-gray-600 uppercase tracking-widest">{costEstimates.provider} ESTIMATE</span>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-xs text-gray-500 uppercase font-bold tracking-widest">Total Monthly Estimate</p>
+                    <h3 className="text-5xl font-bold text-white tracking-tighter">
+                      ${costEstimates.monthlyTotal.toLocaleString()}
+                      <span className="text-lg text-gray-600 ml-2">/mo</span>
+                    </h3>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <h4 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-2">Service Breakdown</h4>
+                  <div className="grid grid-cols-1 gap-4">
+                    {costEstimates.breakdown.map((item, idx) => (
+                      <div key={idx} className="p-6 rounded-2xl bg-[#0D0D0D] border border-[#1A1A1A] flex items-center justify-between group hover:border-[#00E599]/30 transition-all">
+                        <div className="space-y-1">
+                          <p className="text-sm font-bold text-white">{item.service}</p>
+                          <p className="text-xs text-gray-500">{item.rationale}</p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-lg font-bold text-[#00E599]">${item.cost}</p>
+                          <p className="text-[9px] text-gray-600 uppercase font-mono">EST. MONTHLY</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </motion.div>
+            ) : (
+              <div className="h-[60vh] flex flex-col items-center justify-center text-center space-y-4">
+                <div className="w-16 h-16 rounded-3xl bg-[#111] border border-[#1A1A1A] flex items-center justify-center">
+                  <DollarSign className="w-8 h-8 text-gray-700" />
+                </div>
+                <div className="max-w-xs space-y-2">
+                  <h3 className="text-white font-medium">Cost Estimator</h3>
+                  <p className="text-xs text-gray-600 leading-relaxed">Select a cloud provider to estimate the monthly infrastructure costs for your current system design.</p>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </motion.div>
+      )}
+
+      {/* RIGHT PANE: Design Pattern Library */}
+      {activeTab === 'patterns' && (
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+        >
+          <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
+          <div className="flex items-center gap-2 shrink-0">
+            <BookOpen className="w-4 h-4 text-gray-400" />
+            <h2 className="text-sm font-medium text-white">Design Pattern Library</h2>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-8">
+          <div className="max-w-4xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-6">
+            {DESIGN_PATTERNS.map((pattern, idx) => (
+              <motion.div
+                key={pattern.id}
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: idx * 0.1 }}
+                className="p-8 rounded-3xl bg-[#0D0D0D] border border-[#1A1A1A] hover:border-[#00E599]/30 transition-all group flex flex-col h-full"
+              >
+                <div className="flex-1 space-y-4">
+                  <div className="space-y-2">
+                    <h3 className="text-xl font-bold text-white group-hover:text-[#00E599] transition-colors">{pattern.title}</h3>
+                    <p className="text-sm text-gray-500 leading-relaxed">{pattern.description}</p>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <p className="text-[10px] font-bold text-emerald-500/70 uppercase tracking-widest">Pros</p>
+                      <ul className="space-y-1">
+                        {pattern.pros.map((p, i) => (
+                          <li key={i} className="text-[11px] text-gray-400 flex items-start gap-2">
+                            <Check className="w-3 h-3 text-emerald-500 mt-0.5 shrink-0" />
+                            <span>{p}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div className="space-y-2">
+                      <p className="text-[10px] font-bold text-red-500/70 uppercase tracking-widest">Cons</p>
+                      <ul className="space-y-1">
+                        {pattern.cons.map((c, i) => (
+                          <li key={i} className="text-[11px] text-gray-400 flex items-start gap-2">
+                            <X className="w-3 h-3 text-red-500 mt-0.5 shrink-0" />
+                            <span>{c}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => handleApplyPattern(pattern)}
+                  className="mt-8 w-full py-3 rounded-xl bg-[#141414] border border-[#262626] text-xs font-bold text-white uppercase tracking-widest hover:bg-[#00E599] hover:text-black hover:border-transparent transition-all"
+                >
+                  Apply Pattern
+                </button>
+              </motion.div>
+            ))}
+          </div>
+        </div>
+      </motion.div>
+      )}
+
+      {/* RIGHT PANE: Infrastructure as Code (IaC) */}
+      {activeTab === 'iac' && (
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+        >
+          <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
+          <div className="flex items-center gap-2 shrink-0">
+            <Code className="w-4 h-4 text-gray-400" />
+            <h2 className="text-sm font-medium text-white">Infrastructure as Code</h2>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => handleGenerateIaC('terraform')}
+              disabled={isGeneratingIaC}
+              className="px-3 py-1.5 rounded-md bg-[#5C4EE5] text-white text-[10px] font-bold uppercase hover:opacity-90 transition-opacity disabled:opacity-50"
+            >
+              Terraform
+            </button>
+            <button
+              onClick={() => handleGenerateIaC('cloudformation')}
+              disabled={isGeneratingIaC}
+              className="px-3 py-1.5 rounded-md bg-[#FF9900] text-black text-[10px] font-bold uppercase hover:opacity-90 transition-opacity disabled:opacity-50"
+            >
+              CloudFormation
+            </button>
+            <button
+              onClick={() => handleGenerateIaC('cdk')}
+              disabled={isGeneratingIaC}
+              className="px-3 py-1.5 rounded-md bg-[#232F3E] text-white text-[10px] font-bold uppercase hover:opacity-90 transition-opacity disabled:opacity-50"
+            >
+              AWS CDK
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-8">
+          <div className="max-w-4xl mx-auto space-y-8">
+            {isGeneratingIaC ? (
+              <div className="flex flex-col items-center justify-center py-20 space-y-4">
+                <Loader2 className="w-12 h-12 text-[#00E599] animate-spin" />
+                <p className="text-sm text-gray-500 font-mono animate-pulse">GENERATING INFRASTRUCTURE TEMPLATE...</p>
+              </div>
+            ) : iacTemplate ? (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="space-y-6"
+              >
+                <div className="p-6 rounded-2xl bg-[#0D0D0D] border border-[#1A1A1A] space-y-4">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold text-[#00E599] uppercase tracking-widest">{iacTemplate.language} TEMPLATE</span>
+                    <button 
+                      onClick={() => copyToClipboard(iacTemplate.code, 'iac-code')}
+                      className="flex items-center gap-2 px-3 py-1 rounded bg-[#1A1A1A] text-gray-400 hover:text-white transition-colors text-[10px] font-bold uppercase"
+                    >
+                      {copiedId === 'iac-code' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                      Copy Code
+                    </button>
+                  </div>
+                  <pre className="p-4 rounded-xl bg-black border border-[#1A1A1A] text-xs text-emerald-500 font-mono overflow-x-auto">
+                    <code>{iacTemplate.code}</code>
+                  </pre>
+                </div>
+                <div className="p-6 rounded-2xl bg-[#0D0D0D] border border-[#1A1A1A] space-y-2">
+                  <h4 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Explanation</h4>
+                  <p className="text-sm text-gray-400 leading-relaxed">{iacTemplate.explanation}</p>
+                </div>
+              </motion.div>
+            ) : (
+              <div className="h-[60vh] flex flex-col items-center justify-center text-center space-y-4">
+                <div className="w-16 h-16 rounded-3xl bg-[#111] border border-[#1A1A1A] flex items-center justify-center">
+                  <Code className="w-8 h-8 text-gray-700" />
+                </div>
+                <div className="max-w-xs space-y-2">
+                  <h3 className="text-white font-medium">IaC Generator</h3>
+                  <p className="text-xs text-gray-600 leading-relaxed">Select a template format to generate Infrastructure as Code for your current system design.</p>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </motion.div>
+      )}
+
+      {/* RIGHT PANE: Security Audit */}
+      {activeTab === 'security' && (
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+        >
+          <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
+          <div className="flex items-center gap-2 shrink-0">
+            <ShieldCheck className="w-4 h-4 text-gray-400" />
+            <h2 className="text-sm font-medium text-white">Security Audit & Threat Model</h2>
+          </div>
+          <button
+            onClick={handleRunSecurityAudit}
+            disabled={isAuditingSecurity}
+            className="flex items-center gap-2 px-4 py-2 rounded-md bg-red-500/10 border border-red-500/30 text-red-500 text-xs font-bold uppercase hover:bg-red-500/20 transition-all disabled:opacity-50"
+          >
+            <Activity className={cn("w-3.5 h-3.5", isAuditingSecurity && "animate-pulse")} />
+            {isAuditingSecurity ? 'Auditing...' : 'Run Security Audit'}
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-8">
+          <div className="max-w-4xl mx-auto space-y-8">
+            {isAuditingSecurity ? (
+              <div className="flex flex-col items-center justify-center py-20 space-y-4">
+                <Loader2 className="w-12 h-12 text-red-500 animate-spin" />
+                <p className="text-sm text-gray-500 font-mono animate-pulse uppercase">ANALYZING ATTACK VECTORS & VULNERABILITIES...</p>
+              </div>
+            ) : securityAudit ? (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="space-y-8"
+              >
+                <div className="p-8 rounded-3xl bg-gradient-to-br from-[#111] to-[#050505] border border-[#1A1A1A] flex items-center justify-between">
+                  <div className="space-y-1">
+                    <p className="text-xs text-gray-500 uppercase font-bold tracking-widest">Security Health Score</p>
+                    <h3 className={cn(
+                      "text-6xl font-bold tracking-tighter",
+                      securityAudit.score >= 80 ? "text-emerald-500" : securityAudit.score >= 50 ? "text-amber-500" : "text-red-500"
+                    )}>
+                      {securityAudit.score}
+                      <span className="text-lg text-gray-600 ml-2">/100</span>
+                    </h3>
+                  </div>
+                  <div className="w-24 h-24 rounded-full border-4 border-[#1A1A1A] flex items-center justify-center relative">
+                    <div 
+                      className={cn(
+                        "absolute inset-0 rounded-full border-4 transition-all duration-1000",
+                        securityAudit.score >= 80 ? "border-emerald-500" : securityAudit.score >= 50 ? "border-amber-500" : "border-red-500"
+                      )}
+                      style={{ clipPath: `inset(${100 - securityAudit.score}% 0 0 0)` }}
+                    />
+                    <ShieldCheck className={cn(
+                      "w-10 h-10",
+                      securityAudit.score >= 80 ? "text-emerald-500" : securityAudit.score >= 50 ? "text-amber-500" : "text-red-500"
+                    )} />
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <h4 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-2">Vulnerability Assessment</h4>
+                  <div className="grid grid-cols-1 gap-4">
+                    {securityAudit.vulnerabilities.map((v, idx) => (
+                      <div key={idx} className="p-6 rounded-2xl bg-[#0D0D0D] border border-[#1A1A1A] space-y-4 group hover:border-red-500/30 transition-all">
+                        <div className="flex items-center justify-between">
+                          <h5 className="text-sm font-bold text-white">{v.title}</h5>
+                          <span className={cn(
+                            "px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-widest",
+                            v.severity === 'critical' ? "bg-red-500 text-white" :
+                            v.severity === 'high' ? "bg-orange-500 text-white" :
+                            v.severity === 'medium' ? "bg-amber-500 text-black" : "bg-blue-500 text-white"
+                          )}>
+                            {v.severity}
+                          </span>
+                        </div>
+                        <div className="space-y-3">
+                          <div className="space-y-1">
+                            <p className="text-[9px] text-gray-600 uppercase font-bold">Description</p>
+                            <p className="text-xs text-gray-400 leading-relaxed">{v.description}</p>
+                          </div>
+                          <div className="p-3 rounded-xl bg-emerald-500/5 border border-emerald-500/10 space-y-1">
+                            <p className="text-[9px] text-emerald-500/70 uppercase font-bold">Mitigation Strategy</p>
+                            <p className="text-xs text-gray-300 leading-relaxed">{v.mitigation}</p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </motion.div>
+            ) : (
+              <div className="h-[60vh] flex flex-col items-center justify-center text-center space-y-4">
+                <div className="w-16 h-16 rounded-3xl bg-[#111] border border-[#1A1A1A] flex items-center justify-center">
+                  <ShieldCheck className="w-8 h-8 text-gray-700" />
+                </div>
+                <div className="max-w-xs space-y-2">
+                  <h3 className="text-white font-medium">Security Auditor</h3>
+                  <p className="text-xs text-gray-600 leading-relaxed">Run a comprehensive security audit to identify potential vulnerabilities and threat vectors in your architecture.</p>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </motion.div>
+      )}
+
+      {/* RIGHT PANE: Service Skeletons */}
+      {activeTab === 'skeletons' && (
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+        >
+          <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
+          <div className="flex items-center gap-2 shrink-0">
+            <Cpu className="w-4 h-4 text-gray-400" />
+            <h2 className="text-sm font-medium text-white">Service Skeleton Generator</h2>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => handleGenerateSkeletons('Node.js/Express')}
+              disabled={isGeneratingSkeletons}
+              className="px-3 py-1.5 rounded-md bg-[#8CC84B] text-black text-[10px] font-bold uppercase hover:opacity-90 transition-opacity disabled:opacity-50"
+            >
+              Node.js
+            </button>
+            <button
+              onClick={() => handleGenerateSkeletons('Python/FastAPI')}
+              disabled={isGeneratingSkeletons}
+              className="px-3 py-1.5 rounded-md bg-[#3776AB] text-white text-[10px] font-bold uppercase hover:opacity-90 transition-opacity disabled:opacity-50"
+            >
+              Python
+            </button>
+            <button
+              onClick={() => handleGenerateSkeletons('Go/Gin')}
+              disabled={isGeneratingSkeletons}
+              className="px-3 py-1.5 rounded-md bg-[#00ADD8] text-white text-[10px] font-bold uppercase hover:opacity-90 transition-opacity disabled:opacity-50"
+            >
+              Go
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-8">
+          <div className="max-w-5xl mx-auto space-y-8">
+            {isGeneratingSkeletons ? (
+              <div className="flex flex-col items-center justify-center py-20 space-y-4">
+                <Loader2 className="w-12 h-12 text-[#00E599] animate-spin" />
+                <p className="text-sm text-gray-500 font-mono animate-pulse uppercase">SCAFFOLDING SERVICE ARCHITECTURE...</p>
+              </div>
+            ) : serviceSkeletons.length > 0 ? (
+              <div className="space-y-12">
+                {serviceSkeletons.map((service, sIdx) => (
+                  <motion.div
+                    key={sIdx}
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: sIdx * 0.1 }}
+                    className="space-y-4"
+                  >
+                    <div className="flex items-center justify-between px-2">
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-lg bg-[#141414] border border-[#262626] flex items-center justify-center">
+                          <Cpu className="w-4 h-4 text-[#00E599]" />
+                        </div>
+                        <h3 className="text-lg font-bold text-white uppercase tracking-tight">{service.serviceName}</h3>
+                      </div>
+                      <span className="text-[10px] font-mono text-gray-500 uppercase tracking-widest">{service.language}</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-4">
+                      {service.files.map((file, fIdx) => (
+                        <div key={fIdx} className="p-6 rounded-2xl bg-[#0D0D0D] border border-[#1A1A1A] space-y-4">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <FileText className="w-3.5 h-3.5 text-gray-500" />
+                              <span className="text-xs font-mono text-gray-400">{file.path}</span>
+                            </div>
+                            <button 
+                              onClick={() => copyToClipboard(file.content, `skeleton-${sIdx}-${fIdx}`)}
+                              className="p-1.5 rounded hover:bg-[#1A1A1A] text-gray-500 hover:text-white transition-colors"
+                            >
+                              {copiedId === `skeleton-${sIdx}-${fIdx}` ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                            </button>
+                          </div>
+                          <pre className="p-4 rounded-xl bg-black border border-[#1A1A1A] text-[11px] text-emerald-500 font-mono overflow-x-auto">
+                            <code>{file.content}</code>
+                          </pre>
+                        </div>
+                      ))}
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
+            ) : (
+              <div className="h-[60vh] flex flex-col items-center justify-center text-center space-y-4">
+                <div className="w-16 h-16 rounded-3xl bg-[#111] border border-[#1A1A1A] flex items-center justify-center">
+                  <Cpu className="w-8 h-8 text-gray-700" />
+                </div>
+                <div className="max-w-xs space-y-2">
+                  <h3 className="text-white font-medium">Skeleton Generator</h3>
+                  <p className="text-xs text-gray-600 leading-relaxed">Generate boilerplate code and folder structures for the services defined in your architecture.</p>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </motion.div>
+      )}
+
+      {/* RIGHT PANE: Compliance Mapping */}
+      {activeTab === 'compliance' && (
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+        >
+          <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
+          <div className="flex items-center gap-2 shrink-0">
+            <FileCheck className="w-4 h-4 text-gray-400" />
+            <h2 className="text-sm font-medium text-white">Compliance Mapping</h2>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => handleRunComplianceCheck('SOC2')}
+              disabled={isCheckingCompliance}
+              className="px-3 py-1.5 rounded-md border border-[#262626] text-gray-300 text-[10px] font-bold uppercase hover:bg-[#141414] transition-colors disabled:opacity-50"
+            >
+              SOC2
+            </button>
+            <button
+              onClick={() => handleRunComplianceCheck('GDPR')}
+              disabled={isCheckingCompliance}
+              className="px-3 py-1.5 rounded-md border border-[#262626] text-gray-300 text-[10px] font-bold uppercase hover:bg-[#141414] transition-colors disabled:opacity-50"
+            >
+              GDPR
+            </button>
+            <button
+              onClick={() => handleRunComplianceCheck('HIPAA')}
+              disabled={isCheckingCompliance}
+              className="px-3 py-1.5 rounded-md border border-[#262626] text-gray-300 text-[10px] font-bold uppercase hover:bg-[#141414] transition-colors disabled:opacity-50"
+            >
+              HIPAA
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-8">
+          <div className="max-w-4xl mx-auto space-y-8">
+            {isCheckingCompliance ? (
+              <div className="flex flex-col items-center justify-center py-20 space-y-4">
+                <Loader2 className="w-12 h-12 text-blue-500 animate-spin" />
+                <p className="text-sm text-gray-500 font-mono animate-pulse uppercase">MAPPING ARCHITECTURE TO REGULATORY STANDARDS...</p>
+              </div>
+            ) : complianceReport ? (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="space-y-8"
+              >
+                <div className="p-8 rounded-3xl bg-gradient-to-br from-[#111] to-[#050505] border border-[#1A1A1A] flex items-center justify-between">
+                  <div className="space-y-1">
+                    <p className="text-xs text-gray-500 uppercase font-bold tracking-widest">{complianceReport.standard} Readiness Score</p>
+                    <h3 className={cn(
+                      "text-6xl font-bold tracking-tighter",
+                      complianceReport.score >= 80 ? "text-emerald-500" : complianceReport.score >= 50 ? "text-amber-500" : "text-red-500"
+                    )}>
+                      {complianceReport.score}
+                      <span className="text-lg text-gray-600 ml-2">/100</span>
+                    </h3>
+                  </div>
+                  <div className="p-4 rounded-2xl bg-[#141414] border border-[#262626]">
+                    <FileCheck className={cn(
+                      "w-12 h-12",
+                      complianceReport.score >= 80 ? "text-emerald-500" : complianceReport.score >= 50 ? "text-amber-500" : "text-red-500"
+                    )} />
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <h4 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-2">Compliance Findings</h4>
+                  <div className="grid grid-cols-1 gap-4">
+                    {complianceReport.findings.map((finding, idx) => (
+                      <div key={idx} className="p-6 rounded-2xl bg-[#0D0D0D] border border-[#1A1A1A] space-y-4">
+                        <div className="flex items-center justify-between">
+                          <h5 className="text-sm font-bold text-white">{finding.requirement}</h5>
+                          <span className={cn(
+                            "px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-widest",
+                            finding.status === 'compliant' ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" :
+                            finding.status === 'partial' ? "bg-amber-500/20 text-amber-400 border border-amber-500/30" :
+                            "bg-red-500/20 text-red-400 border border-red-500/30"
+                          )}>
+                            {finding.status}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div className="space-y-1">
+                            <p className="text-[9px] text-gray-600 uppercase font-bold">Gap Analysis</p>
+                            <p className="text-xs text-gray-400 leading-relaxed">{finding.gap}</p>
+                          </div>
+                          <div className="space-y-1">
+                            <p className="text-[9px] text-emerald-500/70 uppercase font-bold">Recommendation</p>
+                            <p className="text-xs text-gray-300 leading-relaxed">{finding.recommendation}</p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </motion.div>
+            ) : (
+              <div className="h-[60vh] flex flex-col items-center justify-center text-center space-y-4">
+                <div className="w-16 h-16 rounded-3xl bg-[#111] border border-[#1A1A1A] flex items-center justify-center">
+                  <FileCheck className="w-8 h-8 text-gray-700" />
+                </div>
+                <div className="max-w-xs space-y-2">
+                  <h3 className="text-white font-medium">Compliance Auditor</h3>
+                  <p className="text-xs text-gray-600 leading-relaxed">Map your architecture against regulatory standards to identify gaps in data residency, encryption, and governance.</p>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </motion.div>
+      )}
+
+      {/* RIGHT PANE: Architecture Health Scorecard */}
+      {activeTab === 'scorecard' && (
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+        >
+          <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
+          <div className="flex items-center gap-2 shrink-0">
+            <BarChart3 className="w-4 h-4 text-gray-400" />
+            <h2 className="text-sm font-medium text-white">Architecture Health Scorecard</h2>
+          </div>
+          <button
+            onClick={handleGenerateScorecard}
+            disabled={isGeneratingScorecard}
+            className="flex items-center gap-2 px-4 py-2 rounded-md bg-[#00E599]/10 border border-[#00E599]/30 text-[#00E599] text-xs font-bold uppercase hover:bg-[#00E599]/20 transition-all disabled:opacity-50"
+          >
+            <RefreshCw className={cn("w-3.5 h-3.5", isGeneratingScorecard && "animate-spin")} />
+            {isGeneratingScorecard ? 'Generating...' : 'Generate Scorecard'}
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-8">
+          <div className="max-w-4xl mx-auto space-y-8">
+            {isGeneratingScorecard ? (
+              <div className="flex flex-col items-center justify-center py-20 space-y-4">
+                <Loader2 className="w-12 h-12 text-[#00E599] animate-spin" />
+                <p className="text-sm text-gray-500 font-mono animate-pulse uppercase">AGGREGATING ARCHITECTURAL INTELLIGENCE...</p>
+              </div>
+            ) : healthScorecard ? (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="space-y-8"
+              >
+                <div className="p-8 rounded-3xl bg-gradient-to-br from-[#111] to-[#050505] border border-[#1A1A1A] flex items-center justify-between">
+                  <div className="space-y-1">
+                    <p className="text-xs text-gray-500 uppercase font-bold tracking-widest">Overall Readiness Score</p>
+                    <h3 className={cn(
+                      "text-7xl font-bold tracking-tighter",
+                      healthScorecard.overall >= 80 ? "text-emerald-500" : healthScorecard.overall >= 50 ? "text-amber-500" : "text-red-500"
+                    )}>
+                      {healthScorecard.overall}
+                      <span className="text-lg text-gray-600 ml-2">/100</span>
+                    </h3>
+                  </div>
+                  <div className="p-6 rounded-2xl bg-[#141414] border border-[#262626]">
+                    <Sparkles className={cn(
+                      "w-12 h-12",
+                      healthScorecard.overall >= 80 ? "text-emerald-500" : healthScorecard.overall >= 50 ? "text-amber-500" : "text-red-500"
+                    )} />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {[
+                    { label: 'Security', score: healthScorecard.security, icon: ShieldCheck, color: 'text-red-500' },
+                    { label: 'Cost Efficiency', score: healthScorecard.cost, icon: DollarSign, color: 'text-emerald-500' },
+                    { label: 'Compliance', score: healthScorecard.compliance, icon: FileCheck, color: 'text-blue-500' },
+                    { label: 'Performance', score: healthScorecard.performance, icon: Gauge, color: 'text-amber-500' }
+                  ].map((stat, idx) => (
+                    <div key={idx} className="p-6 rounded-2xl bg-[#0D0D0D] border border-[#1A1A1A] space-y-4">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <stat.icon className={cn("w-4 h-4", stat.color)} />
+                          <span className="text-xs font-bold text-white uppercase tracking-widest">{stat.label}</span>
+                        </div>
+                        <span className={cn("text-xl font-bold", stat.color)}>{stat.score}%</span>
+                      </div>
+                      <div className="h-1.5 w-full bg-[#1A1A1A] rounded-full overflow-hidden">
+                        <motion.div 
+                          initial={{ width: 0 }}
+                          animate={{ width: `${stat.score}%` }}
+                          className={cn("h-full", stat.color.replace('text-', 'bg-'))} 
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="p-8 rounded-3xl bg-[#0D0D0D] border border-[#1A1A1A] space-y-4">
+                  <h4 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Executive Summary</h4>
+                  <p className="text-sm text-gray-300 leading-relaxed italic">"{healthScorecard.summary}"</p>
+                </div>
+              </motion.div>
+            ) : (
+              <div className="h-[60vh] flex flex-col items-center justify-center text-center space-y-4">
+                <div className="w-16 h-16 rounded-3xl bg-[#111] border border-[#1A1A1A] flex items-center justify-center">
+                  <BarChart3 className="w-8 h-8 text-gray-700" />
+                </div>
+                <div className="max-w-xs space-y-2">
+                  <h3 className="text-white font-medium">System Readiness Scorecard</h3>
+                  <p className="text-xs text-gray-600 leading-relaxed">Generate a high-level health report that aggregates security, cost, compliance, and performance metrics.</p>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </motion.div>
+      )}
+
+      {/* RIGHT PANE: Performance Estimator */}
+      {activeTab === 'performance' && (
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+        >
+          <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
+          <div className="flex items-center gap-2 shrink-0">
+            <Gauge className="w-4 h-4 text-gray-400" />
+            <h2 className="text-sm font-medium text-white">Performance & Scalability Estimator</h2>
+          </div>
+          <button
+            onClick={handleEstimatePerformance}
+            disabled={isEstimatingPerformance}
+            className="flex items-center gap-2 px-4 py-2 rounded-md bg-amber-500/10 border border-amber-500/30 text-amber-500 text-xs font-bold uppercase hover:bg-amber-500/20 transition-all disabled:opacity-50"
+          >
+            <Zap className={cn("w-3.5 h-3.5", isEstimatingPerformance && "animate-pulse")} />
+            {isEstimatingPerformance ? 'Simulating...' : 'Run Simulation'}
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-8">
+          <div className="max-w-4xl mx-auto space-y-8">
+            {isEstimatingPerformance ? (
+              <div className="flex flex-col items-center justify-center py-20 space-y-4">
+                <Loader2 className="w-12 h-12 text-amber-500 animate-spin" />
+                <p className="text-sm text-gray-500 font-mono animate-pulse uppercase">SIMULATING TRAFFIC & BOTTLENECKS...</p>
+              </div>
+            ) : performanceEstimate ? (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="space-y-8"
+              >
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="p-8 rounded-3xl bg-[#0D0D0D] border border-[#1A1A1A] space-y-2">
+                    <p className="text-xs text-gray-500 uppercase font-bold tracking-widest">Estimated Throughput</p>
+                    <h3 className="text-5xl font-bold text-white tracking-tighter">
+                      {performanceEstimate.tps.toLocaleString()}
+                      <span className="text-lg text-gray-600 ml-2">TPS</span>
+                    </h3>
+                  </div>
+                  <div className="p-8 rounded-3xl bg-[#0D0D0D] border border-[#1A1A1A] space-y-2">
+                    <p className="text-xs text-gray-500 uppercase font-bold tracking-widest">Estimated Latency</p>
+                    <h3 className="text-5xl font-bold text-amber-500 tracking-tighter">
+                      {performanceEstimate.latency}
+                    </h3>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <h4 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-2">Identified Bottlenecks</h4>
+                  <div className="grid grid-cols-1 gap-3">
+                    {performanceEstimate.bottlenecks.map((b, idx) => (
+                      <div key={idx} className="p-4 rounded-xl bg-red-500/5 border border-red-500/10 flex items-center gap-3">
+                        <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" />
+                        <span className="text-sm text-gray-300">{b}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="p-8 rounded-3xl bg-[#0D0D0D] border border-[#1A1A1A] space-y-4">
+                  <div className="flex items-center gap-2">
+                    <Layers className="w-4 h-4 text-[#00E599]" />
+                    <h4 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Scalability Analysis</h4>
+                  </div>
+                  <p className="text-sm text-gray-400 leading-relaxed">{performanceEstimate.scalability}</p>
+                </div>
+              </motion.div>
+            ) : (
+              <div className="h-[60vh] flex flex-col items-center justify-center text-center space-y-4">
+                <div className="w-16 h-16 rounded-3xl bg-[#111] border border-[#1A1A1A] flex items-center justify-center">
+                  <Gauge className="w-8 h-8 text-gray-700" />
+                </div>
+                <div className="max-w-xs space-y-2">
+                  <h3 className="text-white font-medium">Performance Estimator</h3>
+                  <p className="text-xs text-gray-600 leading-relaxed">Simulate system performance to estimate throughput, latency, and identify potential architectural bottlenecks.</p>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </motion.div>
+      )}
     </div>
 
     {/* Edit Node Modal */}
