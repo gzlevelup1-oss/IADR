@@ -3,11 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { GoogleGenAI, Type } from '@google/genai';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Send, Bot, User, FileText, Server, AlertTriangle, ListChecks, Download, Upload, Loader2, Sparkles, MessageSquare, Layers, Target, Zap, Shield, Database, Layout, Link2, ChevronRight, Activity, Share2, Edit2, Trash2, X, Copy, Check, Plus, RefreshCw, Settings, FileJson, Split, Paperclip, DollarSign, BookOpen, Code, ShieldCheck, Cpu, FileCheck, BarChart3, Gauge } from 'lucide-react';
+import { Send, Bot, User, FileText, Server, AlertTriangle, ListChecks, Download, Upload, Loader2, Sparkles, MessageSquare, Layers, Target, Zap, Shield, Database, Layout, Link2, ChevronRight, Activity, Share2, Edit2, Trash2, X, Copy, Check, Plus, RefreshCw, Settings, FileJson, Split, Paperclip, DollarSign, BookOpen, Code, ShieldCheck, Cpu, FileCheck, BarChart3, Gauge, FolderOpen } from 'lucide-react';
 
 const DESIGN_PATTERNS = [
   { id: 'microservices', title: 'Microservices', description: 'Decompose system into small, independent services communicating over network.', pros: ['Scalability', 'Independent deployment'], cons: ['Complexity', 'Network latency'] },
@@ -20,6 +20,8 @@ const DESIGN_PATTERNS = [
 import { motion, AnimatePresence } from 'motion/react';
 import { KnowledgeGraphView } from './components/KnowledgeGraph';
 import { Mermaid } from './components/Mermaid';
+import { ChatMessage } from './components/ChatMessage';
+import { ProjectItem } from './components/ProjectItem';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -35,6 +37,38 @@ declare global {
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
+
+type ProjectTemplate = {
+  id: string;
+  name: string;
+  description: string;
+  prompt: string;
+  category: 'system-design' | 'api-research' | 'competitive-analysis' | 'custom';
+};
+
+const DEFAULT_TEMPLATES: ProjectTemplate[] = [
+  {
+    id: 'system-design',
+    name: 'System Design',
+    description: 'Deep dive into architectural components, data flow, and scaling strategies.',
+    category: 'system-design',
+    prompt: 'I want to design a new system. Please help me define the high-level architecture, key components, data models, and scaling strategies. Let\'s start by discussing the core requirements and expected load.'
+  },
+  {
+    id: 'api-research',
+    name: 'API Research',
+    description: 'Evaluate external APIs, integration complexity, and feature parity.',
+    category: 'api-research',
+    prompt: 'I am researching external APIs for a specific functionality. Please help me evaluate the top 3 providers in this space, comparing their features, pricing, documentation quality, and integration complexity.'
+  },
+  {
+    id: 'competitive-analysis',
+    name: 'Competitive Analysis',
+    description: 'Analyze market competitors, their tech stacks, and unique value propositions.',
+    category: 'competitive-analysis',
+    prompt: 'I want to perform a competitive analysis for a new product idea. Please help me identify the main competitors, analyze their technology stacks, feature sets, and unique value propositions. Let\'s also look for market gaps we can exploit.'
+  }
+];
 
 type Message = { 
   id: string; 
@@ -195,6 +229,19 @@ export default function App() {
     }
     return [];
   });
+
+  const [templates, setTemplates] = useState<ProjectTemplate[]>(() => {
+    try {
+      const saved = localStorage.getItem('archbot_templates');
+      if (saved) {
+        return JSON.parse(saved);
+      }
+    } catch (e) {
+      console.error("Failed to parse templates", e);
+    }
+    return DEFAULT_TEMPLATES;
+  });
+
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(() => {
     return localStorage.getItem('archbot_current_project_id');
   });
@@ -262,41 +309,9 @@ export default function App() {
     }
   }, [currentProjectId]);
 
-  // Save current project when data changes (Debounced)
   useEffect(() => {
-    if (!currentProjectId) return;
-    
-    const timeoutId = setTimeout(() => {
-      setProjects(prev => {
-        const updated = prev.map(p => {
-          if (p.id === currentProjectId) {
-            return {
-              ...p,
-              messages,
-              graph,
-              tradeOffs,
-              executiveSummary,
-              syncIndex: lastSyncIndexRef.current,
-              updatedAt: Date.now()
-            };
-          }
-          return p;
-        });
-        
-        // Persist to localStorage only if changed
-        const currentProject = updated.find(p => p.id === currentProjectId);
-        const prevProject = prev.find(p => p.id === currentProjectId);
-        
-        if (JSON.stringify(currentProject) !== JSON.stringify(prevProject)) {
-          localStorage.setItem('archbot_projects', JSON.stringify(updated));
-        }
-        
-        return updated;
-      });
-    }, 1000); // 1s debounce
-
-    return () => clearTimeout(timeoutId);
-  }, [messages, graph, tradeOffs, executiveSummary, currentProjectId]);
+    localStorage.setItem('archbot_templates', JSON.stringify(templates));
+  }, [templates]);
 
   useEffect(() => {
     if (currentProjectId) {
@@ -308,11 +323,61 @@ export default function App() {
   const [isTyping, setIsTyping] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
   const [isNewProjectModalOpen, setIsNewProjectModalOpen] = useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
+  const [isTemplateManagerOpen, setIsTemplateManagerOpen] = useState(false);
+  const [newTemplate, setNewTemplate] = useState<Partial<ProjectTemplate>>({
+    name: '',
+    description: '',
+    prompt: '',
+    category: 'custom'
+  });
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectStrategy, setNewProjectStrategy] = useState<'mvp' | 'scale' | 'hybrid'>('mvp');
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
   const [isAnalyzingGaps, setIsAnalyzingGaps] = useState(false);
   const [isGeneratingSRS, setIsGeneratingSRS] = useState(false);
+
+  // Save current project when data changes (Debounced)
+  useEffect(() => {
+    if (!currentProjectId) return;
+    
+    const timeoutId = setTimeout(() => {
+      // Update localStorage directly to avoid triggering a full App re-render via setProjects
+      const savedProjects = localStorage.getItem('archbot_projects');
+      if (savedProjects) {
+        try {
+          const parsed = JSON.parse(savedProjects);
+          const updated = parsed.map((p: any) => {
+            if (p.id === currentProjectId) {
+              return {
+                ...p,
+                messages,
+                graph,
+                tradeOffs,
+                executiveSummary,
+                syncIndex: lastSyncIndexRef.current,
+                updatedAt: Date.now()
+              };
+            }
+            return p;
+          });
+          
+          if (JSON.stringify(parsed) !== JSON.stringify(updated)) {
+            localStorage.setItem('archbot_projects', JSON.stringify(updated));
+            // Only update the projects state if we are not in the middle of a heavy operation
+            // This keeps the sidebar in sync without causing flickering during active chat
+            if (!isTyping && !isExtracting) {
+              setProjects(updated);
+            }
+          }
+        } catch (e) {
+          console.error("Failed to sync projects to localStorage", e);
+        }
+      }
+    }, 2000); // Increased debounce to 2s
+
+    return () => clearTimeout(timeoutId);
+  }, [messages, graph, tradeOffs, executiveSummary, currentProjectId, isTyping, isExtracting]);
   const [isGeneratingClarity, setIsGeneratingClarity] = useState(false);
   const [extractionError, setExtractionError] = useState<string | null>(null);
   const [autoSync, setAutoSync] = useState(false);
@@ -332,6 +397,14 @@ export default function App() {
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 2000);
   };
+
+  const handleNodeClick = useCallback((msgId: string) => {
+    setActiveTab('chat');
+    setHighlightedMessageId(msgId);
+    const el = document.getElementById(`msg-${msgId}`);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setTimeout(() => setHighlightedMessageId(null), 3000);
+  }, []);
 
   const chatRef = useRef<any>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -843,10 +916,6 @@ export default function App() {
       // For PDF, we'll notify the user we're processing
       setMessages(prev => [...prev, { id: Date.now().toString(), role: 'model', text: `📁 Processing PDF: ${file.name}...` }]);
       
-      // PDF extraction is complex in browser without worker, 
-      // for now we'll just read it as text if it's small or use a placeholder
-      // In a real app, we'd use pdfjs-dist properly.
-      // Let's try a simple text read for now or just handle .md
       reader.onload = async (event) => {
         const text = event.target?.result as string;
         handleSend(`I've uploaded a file named ${file.name}. Here is its content for context:\n\n${text.substring(0, 5000)}`);
@@ -861,6 +930,39 @@ export default function App() {
     } else {
       alert("Unsupported file type. Please upload .pdf, .md, or .txt files.");
     }
+  };
+
+  const handleFolderImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    const mdFiles = Array.from(files).filter(file => 
+      file.name.endsWith('.md') || file.name.endsWith('.txt')
+    );
+
+    if (mdFiles.length === 0) {
+      alert("No .md or .txt files found in the selected folder.");
+      return;
+    }
+
+    setMessages(prev => [...prev, { 
+      id: Date.now().toString(), 
+      role: 'model', 
+      text: `📂 Importing folder with ${mdFiles.length} markdown/text files...` 
+    }]);
+
+    let combinedContent = "";
+    for (const file of mdFiles) {
+      const text = await file.text();
+      combinedContent += `\n\n--- FILE: ${file.webkitRelativePath || file.name} ---\n${text}`;
+    }
+
+    const MAX_SIZE = 50000; 
+    if (combinedContent.length > MAX_SIZE) {
+      combinedContent = combinedContent.substring(0, MAX_SIZE) + "\n\n... [Content truncated due to size] ...";
+    }
+
+    handleSend(`I've imported a folder containing ${mdFiles.length} files. Here is the combined content for context:\n${combinedContent}`);
   };
 
   const handleGenerateIaC = async (language: 'terraform' | 'cloudformation' | 'cdk') => {
@@ -1170,19 +1272,31 @@ export default function App() {
   const handleCreateProject = () => {
     if (!newProjectName.trim()) return;
 
+    const template = templates.find(t => t.id === selectedTemplateId);
+    
+    const initialMessages: Message[] = [
+      {
+        id: '1',
+        role: 'model',
+        text: `Hello! I'm your R&D Architecture Assistant. We are starting a new project: ${newProjectName} with a ${newProjectStrategy} strategy.${template ? ` Applying template: **${template.name}**.` : ''} What kind of system or feature are we designing today?`
+      }
+    ];
+
+    if (template) {
+      initialMessages.push({
+        id: '2',
+        role: 'user',
+        text: template.prompt
+      });
+    }
+
     const newProject: Project = {
       id: Math.random().toString(36).substring(7),
       name: newProjectName,
       strategy: newProjectStrategy,
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      messages: [
-        {
-          id: '1',
-          role: 'model',
-          text: `Hello! I'm your R&D Architecture Assistant. We are starting a new project: ${newProjectName} with a ${newProjectStrategy} strategy. What kind of system or feature are we designing today?`
-        }
-      ],
+      messages: initialMessages,
       graph: { nodes: [], decisions: [], conflicts: [] },
       tradeOffs: [],
       executiveSummary: undefined,
@@ -1194,6 +1308,29 @@ export default function App() {
     setActiveTab('chat');
     setIsNewProjectModalOpen(false);
     setNewProjectName('');
+    setSelectedTemplateId(null);
+  };
+
+  const handleSaveTemplate = () => {
+    if (!newTemplate.name || !newTemplate.prompt) return;
+    const template: ProjectTemplate = {
+      id: Math.random().toString(36).substring(7),
+      name: newTemplate.name,
+      description: newTemplate.description || '',
+      prompt: newTemplate.prompt,
+      category: newTemplate.category as any || 'custom'
+    };
+    setTemplates(prev => [...prev, template]);
+    setNewTemplate({ name: '', description: '', prompt: '', category: 'custom' });
+    setIsTemplateManagerOpen(false);
+  };
+
+  const handleDeleteTemplate = (id: string) => {
+    if (DEFAULT_TEMPLATES.some(t => t.id === id)) {
+      alert("Cannot delete default templates.");
+      return;
+    }
+    setTemplates(prev => prev.filter(t => t.id !== id));
   };
 
   const handleUpdateProjectStrategy = (id: string, strategy: 'mvp' | 'scale' | 'hybrid') => {
@@ -1711,14 +1848,17 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
     }
   };
 
-  const scrollToMessage = (messageId: string) => {
-    const element = document.getElementById(`msg-${messageId}`);
-    if (element) {
-      element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      setHighlightedMessageId(messageId);
-      setTimeout(() => setHighlightedMessageId(null), 2000);
-    }
-  };
+  const scrollToMessage = useCallback((messageId: string) => {
+    setActiveTab('chat');
+    setTimeout(() => {
+      const element = document.getElementById(`msg-${messageId}`);
+      if (element) {
+        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setHighlightedMessageId(messageId);
+        setTimeout(() => setHighlightedMessageId(null), 2000);
+      }
+    }, 100);
+  }, []);
 
   return (
     <>
@@ -1925,57 +2065,27 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
         </div>
         <div className="flex-1 overflow-y-auto p-4 space-y-2">
           {projects.map(project => (
-            <div 
+            <ProjectItem
               key={project.id}
-              onClick={() => setCurrentProjectId(project.id)}
-              className={cn(
-                "group p-3 rounded-xl border transition-all cursor-pointer relative",
-                currentProjectId === project.id 
-                  ? "bg-[#141414] border-[#00E599]/30 text-white" 
-                  : "border-transparent text-gray-500 hover:bg-[#111] hover:text-gray-300"
-              )}
-            >
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-xs font-medium truncate pr-8">{project.name}</span>
-                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity absolute right-2">
-                  <button 
-                    onClick={(e) => { e.stopPropagation(); setShowProjectSettings(project.id); }}
-                    className="p-1 hover:text-[#00E599]"
-                    title="Settings"
-                  >
-                    <Settings className="w-3 h-3" />
-                  </button>
-                  <button 
-                    onClick={(e) => handleExportProject(project.id, e)}
-                    className="p-1 hover:text-blue-400"
-                    title="Export"
-                  >
-                    <Share2 className="w-3 h-3" />
-                  </button>
-                  <button 
-                    onClick={(e) => handleDeleteProject(project.id, e)}
-                    className="p-1 hover:text-red-400"
-                    title="Delete"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                </div>
-              </div>
-              <div className="text-[10px] opacity-50 font-mono flex justify-between items-center">
-                <span>{new Date(project.updatedAt).toLocaleDateString()}</span>
-                <select 
-                  value={project.strategy}
-                  onChange={(e) => handleUpdateProjectStrategy(project.id, e.target.value as any)}
-                  onClick={(e) => e.stopPropagation()}
-                  className="bg-transparent text-[9px] border border-white/10 rounded px-1 hover:border-[#00E599]/50 transition-colors"
-                >
-                  <option value="mvp" className="bg-[#0A0A0A]">MVP</option>
-                  <option value="scale" className="bg-[#0A0A0A]">SCALE</option>
-                  <option value="hybrid" className="bg-[#0A0A0A]">HYBRID</option>
-                </select>
-              </div>
-            </div>
+              project={project}
+              currentProjectId={currentProjectId}
+              onSelect={setCurrentProjectId}
+              onSettings={setShowProjectSettings}
+              onExport={handleExportProject}
+              onDelete={handleDeleteProject}
+              onUpdateStrategy={handleUpdateProjectStrategy}
+            />
           ))}
+        </div>
+        
+        <div className="p-4 border-t border-[#262626]">
+          <button 
+            onClick={() => setIsTemplateManagerOpen(true)}
+            className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border border-[#262626] text-gray-400 text-xs font-bold uppercase tracking-widest hover:bg-[#1A1A1A] hover:text-white transition-all"
+          >
+            <FileJson className="w-4 h-4" />
+            Manage Templates
+          </button>
         </div>
       </div>
 
@@ -2001,7 +2111,7 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
         <motion.div 
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="flex flex-col border-r border-[#262626] bg-[#0A0A0A] relative z-10 shadow-2xl min-h-0 flex-1"
+          className="flex flex-col border-r border-[#262626] bg-[#0A0A0A] relative z-10 shadow-2xl h-full min-h-0 flex-1"
         >
           {/* Header */}
         <div className="h-16 flex items-center px-6 glass-header shrink-0">
@@ -2100,89 +2210,13 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
         <div className="flex-1 overflow-y-auto p-3 sm:p-6 space-y-6">
           <AnimatePresence initial={false}>
             {messages.map((msg) => (
-              <motion.div
+              <ChatMessage
                 key={msg.id}
-                id={`msg-${msg.id}`}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ 
-                  opacity: 1, 
-                  y: 0,
-                  backgroundColor: highlightedMessageId === msg.id ? 'rgba(0, 229, 153, 0.1)' : 'transparent'
-                }}
-                transition={{ duration: 0.3 }}
-                className={cn(
-                  "flex gap-3 sm:gap-4 max-w-[98%] sm:max-w-[90%] p-1 sm:p-2 rounded-xl transition-colors",
-                  msg.role === 'user' ? "ml-auto flex-row-reverse" : ""
-                )}
-              >
-                <div className={cn(
-                  "w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-1",
-                  msg.role === 'user' ? "bg-[#1A1A1A] border border-[#333]" : "bg-[#00E599]/10 border border-[#00E599]/20"
-                )}>
-                  {msg.role === 'user' ? <User className="w-4 h-4 text-gray-400" /> : <Bot className="w-4 h-4 text-[#00E599]" />}
-                </div>
-                <div className={cn(
-                  "px-3 sm:px-5 py-3 sm:py-4 rounded-2xl text-[13px] leading-relaxed shadow-sm relative group",
-                  msg.role === 'user' 
-                    ? "bg-[#141414] border border-[#262626] text-gray-200 rounded-tr-sm" 
-                    : "bg-[#111] border border-[#1A1A1A] text-gray-300 rounded-tl-sm"
-                )}>
-                  <button 
-                    onClick={() => copyToClipboard(msg.text, msg.id)}
-                    className="absolute top-2 right-2 p-1.5 rounded-md bg-[#0A0A0A]/50 text-gray-500 opacity-0 group-hover:opacity-100 transition-opacity hover:text-[#00E599]"
-                    title="Copy to clipboard"
-                  >
-                    {copiedId === msg.id ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                  </button>
-                  {msg.role === 'model' ? (
-                    <div className="space-y-4">
-                      {msg.comparison ? (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          {msg.comparison.map((comp, i) => (
-                            <div key={i} className="p-4 rounded-xl bg-[#0A0A0A] border border-[#1A1A1A] space-y-3">
-                              <div className="flex items-center justify-between border-b border-[#1A1A1A] pb-2">
-                                <span className="text-[10px] font-bold text-[#00E599] uppercase tracking-widest">{comp.model}</span>
-                                <button 
-                                  onClick={() => copyToClipboard(comp.text, `${msg.id}-${i}`)}
-                                  className="p-1 rounded hover:bg-gray-800 text-gray-500 hover:text-[#00E599]"
-                                >
-                                  {copiedId === `${msg.id}-${i}` ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                                </button>
-                              </div>
-                              <div className="markdown-body text-xs">
-                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{comp.text}</ReactMarkdown>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="markdown-body">
-                          <ReactMarkdown 
-                            remarkPlugins={[remarkGfm]}
-                            components={{
-                              code({ node, inline, className, children, ...props }: any) {
-                                const match = /language-mermaid/.exec(className || '');
-                                if (!inline && match) {
-                                  return <Mermaid chart={String(children).replace(/\n$/, '')} enableZoom={false} />;
-                                }
-                                return (
-                                  <code className={className} {...props}>
-                                    {children}
-                                  </code>
-                                );
-                              }
-                            }}
-                          >
-                            {msg.text}
-                          </ReactMarkdown>
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <p className="whitespace-pre-wrap">{msg.text}</p>
-                  )}
-                </div>
-              </motion.div>
+                msg={msg}
+                highlightedMessageId={highlightedMessageId}
+                copyToClipboard={copyToClipboard}
+                copiedId={copiedId}
+              />
             ))}
           </AnimatePresence>
           {isTyping && (
@@ -2202,10 +2236,20 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
         {/* Input Area */}
         <div className="p-2 sm:p-4 border-t border-[#262626] bg-[#0A0A0A] shrink-0">
           <div className="relative flex items-end bg-[#141414] border border-[#262626] rounded-xl focus-within:border-[#00E599]/50 focus-within:ring-1 focus-within:ring-[#00E599]/50 transition-all">
-            <div className="absolute left-2 bottom-2 flex items-center">
-              <label className="p-2 rounded-lg text-gray-500 hover:text-white hover:bg-gray-800 cursor-pointer transition-colors">
+            <div className="absolute left-2 bottom-2 flex items-center gap-1">
+              <label className="p-2 rounded-lg text-gray-500 hover:text-white hover:bg-gray-800 cursor-pointer transition-colors" title="Upload File">
                 <Paperclip className="w-4 h-4" />
                 <input type="file" className="hidden" onChange={handleFileUpload} accept=".pdf,.md,.txt" />
+              </label>
+              <label className="p-2 rounded-lg text-gray-500 hover:text-white hover:bg-gray-800 cursor-pointer transition-colors" title="Import Folder">
+                <FolderOpen className="w-4 h-4" />
+                <input 
+                  type="file" 
+                  className="hidden" 
+                  onChange={handleFolderImport} 
+                  {...({ webkitdirectory: "", directory: "" } as any)} 
+                  multiple 
+                />
               </label>
             </div>
             <textarea
@@ -2257,7 +2301,7 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
         <motion.div 
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="flex flex-col border-r border-[#262626] bg-[#0A0A0A] min-h-0 flex-1"
+          className="flex flex-col border-r border-[#262626] bg-[#0A0A0A] h-full min-h-0 flex-1"
         >
           <div className="h-16 flex items-center justify-between px-4 sm:px-6 glass-header shrink-0">
           <div className="flex items-center gap-2 sm:gap-4">
@@ -2594,7 +2638,7 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
         <motion.div 
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="flex flex-col border-r border-[#262626] bg-[#0A0A0A] min-h-0 flex-1"
+          className="flex flex-col border-r border-[#262626] bg-[#0A0A0A] h-full min-h-0 flex-1"
         >
         <div className="h-16 flex items-center justify-between px-4 sm:px-6 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
           <div className="flex items-center gap-2 sm:gap-4 shrink-0">
@@ -2662,7 +2706,7 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
         <motion.div 
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+          className="flex flex-col bg-[#0A0A0A] h-full min-h-0 flex-1"
         >
           <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
           <div className="flex items-center gap-4 shrink-0">
@@ -2947,7 +2991,7 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
         <motion.div 
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+          className="flex flex-col bg-[#0A0A0A] h-full min-h-0 flex-1"
         >
         <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
           <div className="flex items-center gap-2 shrink-0">
@@ -3132,7 +3176,7 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
         <motion.div 
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+          className="flex flex-col bg-[#0A0A0A] h-full min-h-0 flex-1"
         >
           <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
           <div className="flex items-center gap-2 shrink-0">
@@ -3229,7 +3273,7 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
         <motion.div 
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+          className="flex flex-col bg-[#0A0A0A] h-full min-h-0 flex-1"
         >
           <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
           <div className="flex items-center gap-2 shrink-0">
@@ -3298,7 +3342,7 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
         <motion.div 
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+          className="flex flex-col bg-[#0A0A0A] h-full min-h-0 flex-1"
         >
           <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
           <div className="flex items-center gap-2 shrink-0">
@@ -3384,7 +3428,7 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
         <motion.div 
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+          className="flex flex-col bg-[#0A0A0A] h-full min-h-0 flex-1"
         >
           <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
           <div className="flex items-center gap-2 shrink-0">
@@ -3492,7 +3536,7 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
         <motion.div 
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+          className="flex flex-col bg-[#0A0A0A] h-full min-h-0 flex-1"
         >
           <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
           <div className="flex items-center gap-2 shrink-0">
@@ -3596,7 +3640,7 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
         <motion.div 
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+          className="flex flex-col bg-[#0A0A0A] h-full min-h-0 flex-1"
         >
           <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
           <div className="flex items-center gap-2 shrink-0">
@@ -3712,7 +3756,7 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
         <motion.div 
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+          className="flex flex-col bg-[#0A0A0A] h-full min-h-0 flex-1"
         >
           <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
           <div className="flex items-center gap-2 shrink-0">
@@ -3813,7 +3857,7 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
         <motion.div 
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          className="flex flex-col bg-[#0A0A0A] min-h-0 flex-1"
+          className="flex flex-col bg-[#0A0A0A] h-full min-h-0 flex-1"
         >
           <div className="h-16 flex items-center justify-between px-4 md:px-8 glass-header shrink-0 overflow-x-auto no-scrollbar gap-4">
           <div className="flex items-center gap-2 shrink-0">
@@ -4191,6 +4235,50 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
                   {newProjectStrategy === 'hybrid' && "Balanced approach for growing systems."}
                 </p>
               </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-gray-500 uppercase tracking-widest">Project Template</label>
+                  <button 
+                    onClick={() => {
+                      setIsNewProjectModalOpen(false);
+                      setIsTemplateManagerOpen(true);
+                    }}
+                    className="text-[10px] text-[#00E599] hover:underline flex items-center gap-1"
+                  >
+                    <Plus className="w-3 h-3" /> Manage Templates
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 gap-2 max-h-40 overflow-y-auto pr-2 no-scrollbar">
+                  <button
+                    onClick={() => setSelectedTemplateId(null)}
+                    className={cn(
+                      "p-3 rounded-xl border text-left transition-all",
+                      selectedTemplateId === null 
+                        ? "bg-[#00E599]/10 border-[#00E599] text-[#00E599]" 
+                        : "bg-[#141414] border-[#262626] text-gray-400 hover:border-gray-700"
+                    )}
+                  >
+                    <div className="text-xs font-bold uppercase tracking-widest">No Template</div>
+                    <div className="text-[10px] opacity-60">Start with a blank slate.</div>
+                  </button>
+                  {templates.map(t => (
+                    <button
+                      key={t.id}
+                      onClick={() => setSelectedTemplateId(t.id)}
+                      className={cn(
+                        "p-3 rounded-xl border text-left transition-all",
+                        selectedTemplateId === t.id 
+                          ? "bg-[#00E599]/10 border-[#00E599] text-[#00E599]" 
+                          : "bg-[#141414] border-[#262626] text-gray-400 hover:border-gray-700"
+                      )}
+                    >
+                      <div className="text-xs font-bold uppercase tracking-widest">{t.name}</div>
+                      <div className="text-[10px] opacity-60 line-clamp-1">{t.description}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
             <div className="p-6 bg-[#141414] flex gap-3">
               <button 
@@ -4205,6 +4293,130 @@ ${(graph.nodes || []).filter(n => n).map(n => `- **[${(n.category || 'unknown').
                 className="flex-1 py-3 rounded-xl bg-[#00E599] text-black font-bold uppercase tracking-widest text-xs hover:bg-[#00c282] disabled:opacity-50 transition-colors"
               >
                 Create Project
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+    </AnimatePresence>
+    
+    {/* TEMPLATE MANAGER MODAL */}
+    <AnimatePresence>
+      {isTemplateManagerOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95, y: 20 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: 20 }}
+            className="w-full max-w-2xl bg-[#0F0F0F] border border-[#262626] rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
+          >
+            <div className="p-6 border-b border-[#262626] flex items-center justify-between shrink-0">
+              <h3 className="text-lg font-semibold text-white">Manage Project Templates</h3>
+              <button onClick={() => setIsTemplateManagerOpen(false)} className="text-gray-500 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto p-6 space-y-8 no-scrollbar">
+              {/* Create New Template */}
+              <div className="space-y-4 bg-[#141414] p-4 rounded-xl border border-[#262626]">
+                <h4 className="text-xs font-bold text-[#00E599] uppercase tracking-widest">Create New Template</h4>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Name</label>
+                    <input 
+                      type="text" 
+                      value={newTemplate.name}
+                      onChange={(e) => setNewTemplate({...newTemplate, name: e.target.value})}
+                      placeholder="e.g. Microservices Audit"
+                      className="w-full bg-[#0A0A0A] border border-[#262626] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-[#00E599]"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Category</label>
+                    <select 
+                      value={newTemplate.category}
+                      onChange={(e) => setNewTemplate({...newTemplate, category: e.target.value as any})}
+                      className="w-full bg-[#0A0A0A] border border-[#262626] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-[#00E599]"
+                    >
+                      <option value="system-design">System Design</option>
+                      <option value="api-research">API Research</option>
+                      <option value="competitive-analysis">Competitive Analysis</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Description</label>
+                  <input 
+                    type="text" 
+                    value={newTemplate.description}
+                    onChange={(e) => setNewTemplate({...newTemplate, description: e.target.value})}
+                    placeholder="Briefly describe what this template is for..."
+                    className="w-full bg-[#0A0A0A] border border-[#262626] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-[#00E599]"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Prompt Template</label>
+                  <textarea 
+                    value={newTemplate.prompt}
+                    onChange={(e) => setNewTemplate({...newTemplate, prompt: e.target.value})}
+                    placeholder="Enter the initial prompt for this template..."
+                    className="w-full bg-[#0A0A0A] border border-[#262626] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-[#00E599] min-h-[100px]"
+                  />
+                </div>
+                <button 
+                  onClick={handleSaveTemplate}
+                  disabled={!newTemplate.name || !newTemplate.prompt}
+                  className="w-full py-2 rounded-lg bg-[#00E599] text-black font-bold uppercase tracking-widest text-[10px] hover:bg-[#00c282] disabled:opacity-50 transition-colors"
+                >
+                  Save Template
+                </button>
+              </div>
+
+              {/* Existing Templates */}
+              <div className="space-y-4">
+                <h4 className="text-xs font-bold text-gray-500 uppercase tracking-widest">Existing Templates</h4>
+                <div className="grid grid-cols-1 gap-3">
+                  {templates.map(t => (
+                    <div key={t.id} className="p-4 rounded-xl border border-[#262626] bg-[#0A0A0A] group">
+                      <div className="flex items-start justify-between mb-2">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <h5 className="text-sm font-bold text-white">{t.name}</h5>
+                            <span className="text-[9px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-[#141414] text-gray-500 border border-[#262626]">
+                              {t.category}
+                            </span>
+                          </div>
+                          <p className="text-xs text-gray-500 mt-1">{t.description}</p>
+                        </div>
+                        {!DEFAULT_TEMPLATES.some(dt => dt.id === t.id) && (
+                          <button 
+                            onClick={() => handleDeleteTemplate(t.id)}
+                            className="text-gray-600 hover:text-red-400 transition-colors"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+                      <div className="mt-3 p-3 rounded-lg bg-[#141414] border border-[#262626] text-[10px] text-gray-400 font-mono line-clamp-2">
+                        {t.prompt}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+            
+            <div className="p-6 bg-[#141414] border-t border-[#262626]">
+              <button 
+                onClick={() => {
+                  setIsTemplateManagerOpen(false);
+                  setIsNewProjectModalOpen(true);
+                }}
+                className="w-full py-3 rounded-xl border border-[#262626] text-gray-400 font-bold uppercase tracking-widest text-xs hover:bg-[#1A1A1A] transition-colors"
+              >
+                Back to New Project
               </button>
             </div>
           </motion.div>

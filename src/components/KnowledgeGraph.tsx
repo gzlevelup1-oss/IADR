@@ -10,7 +10,7 @@ interface Props {
   onNodeClick: (id: string) => void;
 }
 
-export const KnowledgeGraphView: React.FC<Props> = ({ nodes = [], decisions = [], conflicts = [], onNodeClick }) => {
+export const KnowledgeGraphView = React.memo(({ nodes = [], decisions = [], conflicts = [], onNodeClick }: Props) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hoveredNode, setHoveredNode] = useState<any>(null);
   const [selectedNode, setSelectedNode] = useState<any>(null);
@@ -46,24 +46,42 @@ export const KnowledgeGraphView: React.FC<Props> = ({ nodes = [], decisions = []
     return links;
   }, [nodes, decisions]);
 
+  const simulationRef = useRef<any>(null);
+
   useEffect(() => {
     if (!svgRef.current || d3Nodes.length === 0) return;
 
     const width = svgRef.current.clientWidth;
     const height = svgRef.current.clientHeight;
-
     const svg = d3.select(svgRef.current);
-    svg.selectAll('*').remove();
+    
+    let g = svg.select<SVGGElement>('g.main-group');
+    if (g.empty()) {
+      g = svg.append('g').attr('class', 'main-group');
+      
+      const zoom = d3.zoom<SVGSVGElement, unknown>()
+        .scaleExtent([0.1, 5])
+        .on('zoom', (event) => {
+          g.attr('transform', event.transform);
+        });
 
-    const g = svg.append('g');
+      svg.call(zoom);
 
-    const zoom = d3.zoom<SVGSVGElement, unknown>()
-      .scaleExtent([0.1, 5])
-      .on('zoom', (event) => {
-        g.attr('transform', event.transform);
-      });
-
-    svg.call(zoom);
+      // Arrowhead definition
+      svg.append('defs').append('marker')
+        .attr('id', 'arrowhead')
+        .attr('viewBox', '-0 -5 10 10')
+        .attr('refX', 20)
+        .attr('refY', 0)
+        .attr('orient', 'auto')
+        .attr('markerWidth', 6)
+        .attr('markerHeight', 6)
+        .attr('xoverflow', 'visible')
+        .append('svg:path')
+        .attr('d', 'M 0,-5 L 10 ,0 L 0,5')
+        .attr('fill', '#262626')
+        .style('stroke', 'none');
+    }
 
     // Layer positions for clustering
     const layerCenters: Record<string, { x: number, y: number }> = {
@@ -75,55 +93,71 @@ export const KnowledgeGraphView: React.FC<Props> = ({ nodes = [], decisions = []
       'decision': { x: width * 0.5, y: height * 0.2 }
     };
 
-    const simulation = d3.forceSimulation(d3Nodes as any)
-      .force('link', d3.forceLink(d3Links).id((d: any) => d.id).distance(100))
-      .force('charge', d3.forceManyBody().strength(-300))
-      .force('center', d3.forceCenter(width / 2, height / 2))
-      .force('collision', d3.forceCollide().radius(50))
-      .force('x', d3.forceX().x((d: any) => {
-        const center = layerCenters[d.type === 'decision' ? 'decision' : d.layer];
-        return center ? center.x : width / 2;
-      }).strength(0.1))
-      .force('y', d3.forceY().y((d: any) => {
-        const center = layerCenters[d.type === 'decision' ? 'decision' : d.layer];
-        return center ? center.y : height / 2;
-      }).strength(0.1));
+    if (!simulationRef.current) {
+      simulationRef.current = d3.forceSimulation()
+        .force('link', d3.forceLink().id((d: any) => d.id).distance(100))
+        .force('charge', d3.forceManyBody().strength(-300))
+        .force('center', d3.forceCenter(width / 2, height / 2))
+        .force('collision', d3.forceCollide().radius(50))
+        .force('x', d3.forceX().strength(0.1))
+        .force('y', d3.forceY().strength(0.1));
+    }
 
-    const link = g.append('g')
-      .attr('class', 'links')
-      .selectAll('line')
-      .data(d3Links)
+    const simulation = simulationRef.current;
+    simulation.nodes(d3Nodes);
+    simulation.force('link').links(d3Links);
+    simulation.force('x').x((d: any) => {
+      const center = layerCenters[d.type === 'decision' ? 'decision' : d.layer];
+      return center ? center.x : width / 2;
+    });
+    simulation.force('y').y((d: any) => {
+      const center = layerCenters[d.type === 'decision' ? 'decision' : d.layer];
+      return center ? center.y : height / 2;
+    });
+    simulation.alpha(0.3).restart();
+
+    let linkGroup = g.select<SVGGElement>('g.links');
+    if (linkGroup.empty()) linkGroup = g.append('g').attr('class', 'links');
+
+    const link = linkGroup.selectAll('line')
+      .data(d3Links, (d: any) => `${d.source.id || d.source}-${d.target.id || d.target}`)
       .join('line')
       .attr('stroke', '#262626')
       .attr('stroke-opacity', 0.4)
       .attr('stroke-width', 1.5)
       .attr('marker-end', 'url(#arrowhead)');
 
-    // Arrowhead definition
-    svg.append('defs').append('marker')
-      .attr('id', 'arrowhead')
-      .attr('viewBox', '-0 -5 10 10')
-      .attr('refX', 20)
-      .attr('refY', 0)
-      .attr('orient', 'auto')
-      .attr('markerWidth', 6)
-      .attr('markerHeight', 6)
-      .attr('xoverflow', 'visible')
-      .append('svg:path')
-      .attr('d', 'M 0,-5 L 10 ,0 L 0,5')
-      .attr('fill', '#262626')
-      .style('stroke', 'none');
+    let nodeGroup = g.select<SVGGElement>('g.nodes');
+    if (nodeGroup.empty()) nodeGroup = g.append('g').attr('class', 'nodes');
 
-    const node = g.append('g')
-      .attr('class', 'nodes')
-      .selectAll('g')
-      .data(d3Nodes)
-      .join('g')
-      .attr('cursor', 'pointer')
-      .call(d3.drag<any, any>()
-        .on('start', dragstarted)
-        .on('drag', dragged)
-        .on('end', dragended))
+    const node = nodeGroup.selectAll<SVGGElement, any>('g.node')
+      .data(d3Nodes, (d: any) => d.id)
+      .join(
+        enter => {
+          const gEnter = enter.append('g')
+            .attr('class', 'node')
+            .attr('cursor', 'pointer')
+            .call(d3.drag<any, any>()
+              .on('start', dragstarted)
+              .on('drag', dragged)
+              .on('end', dragended));
+
+          gEnter.append('circle')
+            .attr('r', (d: any) => d.type === 'decision' ? 12 : 8)
+            .attr('stroke-width', 2);
+
+          gEnter.append('text')
+            .attr('x', 15)
+            .attr('y', 4)
+            .attr('fill', '#9ca3af')
+            .style('font-size', '9px')
+            .style('font-family', 'monospace')
+            .style('pointer-events', 'none')
+            .style('opacity', 0.8);
+
+          return gEnter;
+        }
+      )
       .on('click', (event, d) => {
         event.stopPropagation();
         setSelectedNode(d === selectedNode ? null : d);
@@ -132,9 +166,8 @@ export const KnowledgeGraphView: React.FC<Props> = ({ nodes = [], decisions = []
       .on('mouseover', (event, d) => setHoveredNode(d))
       .on('mouseout', () => setHoveredNode(null));
 
-    // Node circles
-    node.append('circle')
-      .attr('r', (d: any) => d.type === 'decision' ? 12 : 8)
+    // Update existing nodes
+    node.select('circle')
       .attr('fill', (d: any) => {
         if (d.type === 'decision') return '#00E599';
         switch (d.layer) {
@@ -150,24 +183,15 @@ export const KnowledgeGraphView: React.FC<Props> = ({ nodes = [], decisions = []
         const isConflicting = conflicts.some(c => c.nodeIds?.includes(d.id));
         return isConflicting ? '#ef4444' : '#0A0A0A';
       })
-      .attr('stroke-width', 2)
       .style('filter', (d: any) => {
         const isConflicting = conflicts.some(c => c.nodeIds?.includes(d.id));
         if (isConflicting) return 'drop-shadow(0 0 8px rgba(239,68,68,0.8))';
         return d.type === 'decision' ? 'drop-shadow(0 0 4px rgba(0,229,153,0.4))' : 'none';
       });
 
-    // Node labels
-    node.append('text')
+    node.select('text')
       .text((d: any) => d.label)
-      .attr('x', 15)
-      .attr('y', 4)
-      .attr('fill', '#9ca3af')
-      .style('font-size', '9px')
-      .style('font-family', 'monospace')
-      .style('pointer-events', 'none')
-      .style('font-weight', (d: any) => d.type === 'decision' ? 'bold' : 'normal')
-      .style('opacity', 0.8);
+      .style('font-weight', (d: any) => d.type === 'decision' ? 'bold' : 'normal');
 
     // Update positions on tick
     simulation.on('tick', () => {
@@ -222,7 +246,7 @@ export const KnowledgeGraphView: React.FC<Props> = ({ nodes = [], decisions = []
     }
 
     return () => {
-      simulation.stop();
+      // Don't stop simulation here, let it persist
     };
   }, [d3Nodes, d3Links, searchQuery, selectedNode, conflicts]);
 
@@ -374,5 +398,5 @@ export const KnowledgeGraphView: React.FC<Props> = ({ nodes = [], decisions = []
       )}
     </div>
   );
-};
+});
 

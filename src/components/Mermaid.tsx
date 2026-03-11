@@ -15,7 +15,7 @@ interface Props {
   enableZoom?: boolean;
 }
 
-export const Mermaid: React.FC<Props> = ({ chart, enableZoom = true }) => {
+export const Mermaid = React.memo(({ chart, enableZoom = true }: Props) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const id = useRef(`mermaid-${Math.random().toString(36).substr(2, 9)}`);
@@ -159,7 +159,7 @@ export const Mermaid: React.FC<Props> = ({ chart, enableZoom = true }) => {
       />
     </div>
   );
-};
+});
 
 // Helper for tailwind classes if not imported
 function cn(...inputs: any[]) {
